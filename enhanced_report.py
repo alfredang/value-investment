@@ -755,9 +755,9 @@ def generate_professional_report(
 
     rec_rows = []
     for d in report_data:
-        m_ok = d.get('m_score') and d['m_score'] < -1.78
-        z_ok = d.get('z_score') and d['z_score'] > 1.8
-        f_ok = d.get('f_score') and d['f_score'] >= 5
+        m_ok = bool(d.get('m_score') and d['m_score'] < -1.78)
+        z_ok = bool(d.get('z_score') and d['z_score'] > 1.8)
+        f_ok = bool(d.get('f_score') and d['f_score'] >= 5)
         underval = d.get('valuation') == 'Undervalued'
 
         score = sum([m_ok, z_ok, f_ok, underval])
