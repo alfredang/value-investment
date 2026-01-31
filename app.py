@@ -59,19 +59,25 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Custom CSS - theme compatible
 st.markdown("""
 <style>
     .stMetric {
-        background-color: #f0f2f6;
-        padding: 10px;
-        border-radius: 5px;
+        padding: 15px;
+        border-radius: 8px;
+        border: 1px solid rgba(128, 128, 128, 0.2);
+    }
+    .stMetric label {
+        color: inherit !important;
+    }
+    .stMetric [data-testid="stMetricValue"] {
+        color: inherit !important;
     }
     .ai-analysis {
-        background-color: #e8f4f8;
         padding: 20px;
         border-radius: 10px;
         border-left: 4px solid #0066cc;
+        background-color: rgba(0, 102, 204, 0.1);
     }
 </style>
 """, unsafe_allow_html=True)
