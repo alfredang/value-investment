@@ -1,15 +1,28 @@
 """
 Value Investment Tool - Streamlit Web App
 
-A stock screening and analysis tool for value investors.
+A stock screening and analysis tool for value investors with AI-powered agents.
 """
+import os
 import streamlit as st
 import pandas as pd
-import io
+import json
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
 from screener import StockScreener
 from valuation import Valuator
 from anomaly_detector import AnomalyDetector, Severity
 from data_loader import DataLoader
+
+# Try to import AI agents
+try:
+    from agents import ValueInvestmentAgent, ScreeningAgent, AnomalyAgent
+    AI_AVAILABLE = True
+except ImportError:
+    AI_AVAILABLE = False
 
 # Page configuration
 st.set_page_config(
@@ -27,23 +40,71 @@ st.markdown("""
         padding: 10px;
         border-radius: 5px;
     }
-    .risk-high { color: #ff4b4b; font-weight: bold; }
-    .risk-elevated { color: #ffa500; font-weight: bold; }
-    .risk-moderate { color: #ffd700; }
-    .risk-low { color: #00cc00; }
-    .undervalued { color: #00cc00; font-weight: bold; }
-    .overvalued { color: #ff4b4b; }
-    .fair-value { color: #666666; }
+    .ai-analysis {
+        background-color: #e8f4f8;
+        padding: 20px;
+        border-radius: 10px;
+        border-left: 4px solid #0066cc;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
+def get_ai_agent(agent_type: str = "general"):
+    """Get AI agent instance if API key is available."""
+    # Check for API key in session state or environment
+    api_key = st.session_state.get('openai_api_key', '') or os.getenv('OPENAI_API_KEY', '')
+
+    if api_key and AI_AVAILABLE:
+        try:
+            # Set the API key in environment for agents
+            os.environ['OPENAI_API_KEY'] = api_key
+
+            if agent_type == "screening":
+                return ScreeningAgent()
+            elif agent_type == "anomaly":
+                return AnomalyAgent()
+            else:
+                return ValueInvestmentAgent()
+        except Exception as e:
+            st.error(f"Error initializing AI agent: {e}")
+    return None
+
+
 def main():
     st.title("📈 Value Investment Tool")
-    st.markdown("*Screen stocks, analyze valuations, and detect financial anomalies*")
+    st.markdown("*Screen stocks, analyze valuations, and detect financial anomalies with AI*")
 
-    # Sidebar navigation
+    # Sidebar
     st.sidebar.title("Navigation")
+
+    # AI Configuration in sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🤖 AI Agent Settings")
+
+    # Check for env variable first
+    env_api_key = os.getenv('OPENAI_API_KEY', '')
+
+    if AI_AVAILABLE:
+        if env_api_key:
+            st.sidebar.success("✓ AI Enabled (from .env)")
+            st.session_state['openai_api_key'] = env_api_key
+        else:
+            api_key = st.sidebar.text_input(
+                "OpenAI API Key",
+                type="password",
+                key="openai_api_key",
+                help="Enter your OpenAI API key or add to .env file"
+            )
+            if api_key:
+                st.sidebar.success("✓ AI Enabled")
+            else:
+                st.sidebar.info("Enter API key or add to .env")
+    else:
+        st.sidebar.warning("Install openai package for AI features")
+
+    st.sidebar.markdown("---")
+
     page = st.sidebar.radio(
         "Select Feature",
         ["Stock Screener", "Anomaly Detector", "About"]
@@ -120,8 +181,21 @@ def show_screener_page():
         roic_wacc = st.slider("Min ROIC-WACC", -20, 50, 0, help="Minimum ROIC minus WACC")
         rote_wacc = st.slider("Min ROTE-WACC", -50, 100, 0, help="Minimum ROTE minus WACC")
 
-    # Build criteria
-    criteria = {}
+    # Build criteria dict for AI
+    criteria_dict = {
+        'gross_margin': gross_margin,
+        'net_margin': net_margin,
+        'roa': roa,
+        'roe': roe,
+        'revenue_growth_5y': revenue_growth,
+        'eps_growth_5y': eps_growth,
+        'debt_to_equity': debt_equity,
+        'fcf_margin': fcf_margin,
+        'roic_wacc': roic_wacc,
+        'rote_wacc': rote_wacc
+    }
+
+    # Column mapping for filtering
     criteria_mapping = {
         'Gross Margin %': ('>=', gross_margin),
         'Net Margin %': ('>=', net_margin),
@@ -169,6 +243,10 @@ def show_screener_page():
 
             filtered_df['Valuation'] = epv_mc.apply(classify_valuation)
 
+        # Store in session state for AI analysis
+        st.session_state['screened_stocks'] = filtered_df
+        st.session_state['screening_criteria'] = criteria_dict
+
         # Display results
         st.subheader("3. Results")
 
@@ -215,6 +293,51 @@ def show_screener_page():
             )
         else:
             st.warning("No stocks match the current criteria. Try relaxing the filters.")
+
+    # AI Agent Analysis Section
+    if 'screened_stocks' in st.session_state and len(st.session_state['screened_stocks']) > 0:
+        st.markdown("---")
+        st.subheader("🤖 AI Agent Analysis")
+
+        agent = get_ai_agent("screening")
+
+        if agent:
+            # Chat interface
+            user_question = st.text_input(
+                "Ask the AI agent about your screening results:",
+                placeholder="e.g., Which stocks look most promising? What are the key risks?",
+                key="screening_question"
+            )
+
+            if st.button("✨ Ask AI Agent", type="secondary"):
+                if user_question:
+                    with st.spinner("AI agent is analyzing..."):
+                        try:
+                            # Prepare context
+                            top_stocks = st.session_state['screened_stocks'].head(10).to_dict('records')
+                            context = f"""Based on screening results with {len(st.session_state['screened_stocks'])} matches.
+Top stocks: {json.dumps(top_stocks[:5], default=str)}
+Criteria: {st.session_state['screening_criteria']}
+
+User question: {user_question}"""
+
+                            response = agent.chat(context)
+
+                            st.markdown("### 📊 AI Agent Response")
+                            st.markdown(f'<div class="ai-analysis">{response.content}</div>', unsafe_allow_html=True)
+
+                            # Show tool calls if any
+                            if response.tool_calls:
+                                with st.expander("🔧 Tools Used"):
+                                    for tc in response.tool_calls:
+                                        st.json(tc)
+
+                        except Exception as e:
+                            st.error(f"AI agent error: {e}")
+                else:
+                    st.warning("Please enter a question for the AI agent.")
+        else:
+            st.info("💡 Add your OpenAI API key to .env or enter in sidebar to enable AI agent features.")
 
 
 def show_anomaly_page():
@@ -280,6 +403,10 @@ def show_anomaly_page():
                 loader = DataLoader("/tmp")
                 detector = AnomalyDetector(loader)
                 report = detector.analyze(selected_symbol)
+
+            # Store for AI analysis
+            st.session_state['anomaly_report'] = report
+            st.session_state['anomaly_detector'] = detector
 
             # Display results
             st.subheader(f"Anomaly Report: {report.symbol}")
@@ -356,6 +483,44 @@ def show_anomaly_page():
                 "text/plain"
             )
 
+        # AI Agent Analysis for Anomalies
+        if 'anomaly_report' in st.session_state:
+            report = st.session_state['anomaly_report']
+
+            st.markdown("---")
+            st.subheader("🤖 AI Agent Interpretation")
+
+            agent = get_ai_agent("anomaly")
+
+            if agent:
+                # Chat interface for anomaly analysis
+                user_question = st.text_input(
+                    "Ask the AI agent about these anomalies:",
+                    placeholder="e.g., Should I be concerned? What should I investigate further?",
+                    key="anomaly_question"
+                )
+
+                if st.button("✨ Ask AI Agent", type="secondary", key="anomaly_btn"):
+                    question = user_question or f"Analyze {report.symbol} for financial anomalies and explain the key risks."
+
+                    with st.spinner("AI agent is analyzing..."):
+                        try:
+                            response = agent.chat(question)
+
+                            st.markdown("### 🔬 AI Agent Analysis")
+                            st.markdown(f'<div class="ai-analysis">{response.content}</div>', unsafe_allow_html=True)
+
+                            # Show tool calls if any
+                            if response.tool_calls:
+                                with st.expander("🔧 Tools Used"):
+                                    for tc in response.tool_calls:
+                                        st.json(tc)
+
+                        except Exception as e:
+                            st.error(f"AI agent error: {e}")
+            else:
+                st.info("💡 Add your OpenAI API key to .env or enter in sidebar to enable AI agent features.")
+
     except Exception as e:
         st.error(f"Error reading file: {e}")
 
@@ -366,7 +531,7 @@ def show_about_page():
     st.markdown("""
     ## Value Investment Tool
 
-    A comprehensive tool for value investors to screen stocks and detect financial anomalies.
+    A comprehensive tool for value investors to screen stocks and detect financial anomalies, now with **AI-powered analysis**.
 
     ### Features
 
@@ -374,6 +539,7 @@ def show_about_page():
     - Filter by 10 fundamental criteria
     - Support for US and Singapore markets
     - Automatic valuation using EPV vs Market Cap
+    - 🤖 **AI Analysis**: Get intelligent insights and recommendations
 
     **2. Anomaly Detector**
     - Beneish M-Score analysis (earnings manipulation)
@@ -381,6 +547,14 @@ def show_about_page():
     - Piotroski F-Score (financial strength)
     - One-off event detection
     - Cash flow consistency checks
+    - 🤖 **AI Interpretation**: Understand what anomalies mean
+
+    ### AI Agent Features (requires OpenAI API key)
+
+    - **Screening Agent**: Specialized AI that helps find value stocks and explains picks
+    - **Anomaly Agent**: Forensic AI that interprets financial red flags
+    - **Research Agent**: AI that generates investment theses and recommendations
+    - **Tool Use**: Agents can call tools to screen stocks, detect anomalies, compare companies
 
     ### Valuation Classification
 
@@ -390,14 +564,14 @@ def show_about_page():
     | Fair Value | 0.7 - 1.3 | Within reasonable range |
     | Overvalued | < 0.7 | EPV 30%+ below Market Cap |
 
-    ### Data Sources
+    ### How to Enable AI
 
-    This tool requires:
-    - **Screener Data**: CSV files with stock fundamentals
-    - **Anomaly Data**: XLS files with 30-year financial history
+    1. Get an API key from [OpenAI](https://platform.openai.com)
+    2. Enter the key in the sidebar
+    3. Click "Generate AI Analysis" on any results page
 
     ---
-    Built with Streamlit | [GitHub Repository](https://github.com/alfredang/value-investment)
+    Built with Streamlit & OpenAI | [GitHub Repository](https://github.com/alfredang/value-investment)
     """)
 
 

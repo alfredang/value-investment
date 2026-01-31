@@ -26,6 +26,10 @@ ENV/
 env/
 .venv/
 
+# uv
+.uv/
+uv.lock
+
 # IDE
 .idea/
 .vscode/
@@ -37,7 +41,17 @@ env/
 .DS_Store
 Thumbs.db
 
+# Environment
+.env
+.env.local
+.env.*.local
+
 # Project specific
 *.log
 output/
 results/
+
+# Data files (user should provide their own)
+*.xls
+*.xlsx
+*.csv
