@@ -85,9 +85,18 @@ st.markdown("""
 
 def init_config():
     """Initialize configuration from admin settings."""
+    # First, check for API key in environment (from .env file)
+    env_api_key = os.getenv('OPENAI_API_KEY', '')
+    if env_api_key:
+        st.session_state['openai_api_key'] = env_api_key
+
     if ADMIN_AVAILABLE:
         api_keys = get_api_keys()
         apply_api_keys_to_env(api_keys)
+
+        # Also set in session state if available from config
+        if api_keys.openai_api_key:
+            st.session_state['openai_api_key'] = api_keys.openai_api_key
 
         # Load LLM config into session state
         config = load_config()
@@ -186,17 +195,19 @@ def show_persistent_chat():
                     st.session_state.persistent_chat_messages = []
                     st.rerun()
         else:
-            st.info("Enter OpenAI API key in Settings to enable AI Assistant")
+            # Show appropriate message based on what's missing
+            api_key = st.session_state.get('openai_api_key', '') or os.getenv('OPENAI_API_KEY', '')
+            if not AI_AVAILABLE:
+                st.warning("AI agents module not available. Check openai-agents package installation.")
+            elif not api_key:
+                st.info("Enter OpenAI API key in Settings to enable AI Assistant")
+            else:
+                st.warning("AI initialization failed. Check API key validity.")
 
 
 def main():
-    # Initialize configuration from admin settings
+    # Initialize configuration from admin settings (includes API key setup)
     init_config()
-
-    # Check API key
-    env_api_key = os.getenv('OPENAI_API_KEY', '')
-    if env_api_key:
-        st.session_state['openai_api_key'] = env_api_key
 
     # Check if settings page should be shown
     if st.session_state.get('show_settings', False):
