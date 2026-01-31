@@ -1,6 +1,8 @@
 # Value Investment Tool
 
-A Python CLI tool for value investors that provides criteria-based stock screening, automated valuation, and financial anomaly detection for US and Singapore markets.
+A Python tool for value investors that provides criteria-based stock screening, automated valuation, and financial anomaly detection for US and Singapore markets.
+
+**[🚀 Try the Live Demo](https://value-investment.streamlit.app)** *(Deploy your own to use)*
 
 ## Features
 
@@ -33,18 +35,43 @@ Detects financial distortions and red flags:
 - **Cash Flow Mismatches**: Positive earnings with negative operating cash flow
 - **Balance Sheet Anomalies**: Receivables/inventory growth vs revenue
 
-## Installation
+## Quick Start
+
+### Option 1: Web App (Streamlit)
 
 ```bash
-# Clone the repository
+# Clone and run locally
 git clone https://github.com/alfredang/value-investment.git
 cd value-investment
-
-# Install dependencies
 pip install -r requirements.txt
+streamlit run app.py
 ```
 
-## Usage
+### Option 2: Command Line Interface
+
+```bash
+# Screen US stocks
+python main.py screen --market US --roe 15 --gross-margin 30
+
+# Analyze company for anomalies
+python main.py analyze DDI
+
+# Show help
+python main.py --help
+```
+
+## Deploy to Streamlit Cloud (Free)
+
+1. Fork this repository to your GitHub account
+2. Go to [share.streamlit.io](https://share.streamlit.io)
+3. Click "New app"
+4. Select your forked repository
+5. Set main file path: `app.py`
+6. Click "Deploy"
+
+Your app will be live at `https://[your-app-name].streamlit.app`
+
+## CLI Usage
 
 ### Screen Stocks
 ```bash
@@ -88,9 +115,6 @@ python main.py criteria
 
 # Show available symbols for anomaly analysis
 python main.py symbols
-
-# Show help
-python main.py --help
 ```
 
 ## Screening Criteria
@@ -129,10 +153,9 @@ Create a JSON file with your preferred criteria:
 
 ## Data Files
 
-Place your data files in the project root directory:
-- `US All In One Screeners*.csv` - US market data
-- `SG All In One Screeners*.csv` - Singapore market data
-- `Companies with anomalies.xls` - Detailed financials for anomaly analysis
+The tool accepts:
+- **Screener CSV**: Stock fundamentals data with columns for margins, ratios, growth rates
+- **Anomaly XLS**: 30-year financial history for detailed analysis
 
 ## Dependencies
 
@@ -141,6 +164,7 @@ Place your data files in the project root directory:
 - click >= 8.0.0
 - tabulate >= 0.9.0
 - rich >= 13.0.0
+- streamlit >= 1.28.0
 
 ## License
 
