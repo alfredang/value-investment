@@ -473,13 +473,65 @@ def show_tabbed_workflow():
             st.markdown(f"### 🔍 Anomaly Analysis: Review Financial Red Flags")
             st.markdown(f"**{len(selected)} companies:** {', '.join(selected)}")
 
+            # Anomaly Detection Options (Yes/No Toggles)
+            st.markdown("#### 🎚️ Select Anomaly Checks to Run")
+
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                st.markdown("**Earnings Quality**")
+                check_mscore = st.toggle("M-Score (Manipulation)", value=True,
+                    help="Beneish M-Score detects earnings manipulation. Pass if < -1.78")
+                check_sloan = st.toggle("Sloan Ratio (Accruals)", value=True,
+                    help="High accruals (>10%) suggest poor earnings quality")
+
+            with col2:
+                st.markdown("**Financial Health**")
+                check_zscore = st.toggle("Z-Score (Bankruptcy)", value=True,
+                    help="Altman Z-Score predicts bankruptcy. Safe if > 1.8")
+                check_fscore = st.toggle("F-Score (Strength)", value=True,
+                    help="Piotroski F-Score measures financial strength. Strong if ≥ 5")
+
+            with col3:
+                st.markdown("**Cash Flow Analysis**")
+                check_cfmismatch = st.toggle("Cash Flow Mismatch", value=True,
+                    help="Flag if positive net income but negative operating cash flow")
+                check_fcftrend = st.toggle("FCF Trend", value=False,
+                    help="Analyze free cash flow consistency over time")
+
+            with col4:
+                st.markdown("**Balance Sheet**")
+                check_inventory = st.toggle("Inventory Build-up", value=False,
+                    help="Flag if inventory growth exceeds revenue growth")
+                check_receivables = st.toggle("Receivables Growth", value=False,
+                    help="Flag if receivables growth exceeds revenue growth")
+
+            # Store selected checks in session state
+            st.session_state.workflow_data['anomaly_checks'] = {
+                'mscore': check_mscore,
+                'zscore': check_zscore,
+                'fscore': check_fscore,
+                'sloan': check_sloan,
+                'cfmismatch': check_cfmismatch,
+                'fcftrend': check_fcftrend,
+                'inventory': check_inventory,
+                'receivables': check_receivables
+            }
+
+            st.markdown("---")
             st.markdown("""
-            | Criterion | Pass | Description |
-            |-----------|------|-------------|
-            | **M-Score** | < -1.78 | No earnings manipulation |
-            | **Z-Score** | > 1.8 | Not in distress zone |
-            | **F-Score** | >= 5 | Strong financials |
-            """)
+            | Active Check | Pass Threshold | Description |
+            |-----------|------|-------------|""")
+            if check_mscore:
+                st.markdown("| **M-Score** | < -1.78 | No earnings manipulation |")
+            if check_zscore:
+                st.markdown("| **Z-Score** | > 1.8 | Not in distress zone |")
+            if check_fscore:
+                st.markdown("| **F-Score** | ≥ 5 | Strong financials |")
+            if check_sloan:
+                st.markdown("| **Sloan Ratio** | < 10% | Good earnings quality |")
+            if check_cfmismatch:
+                st.markdown("| **CF Mismatch** | Aligned | OCF supports Net Income |")
 
             if st.button("🔍 Run Anomaly Detection", type="primary"):
                 results = {}
@@ -514,19 +566,53 @@ def show_tabbed_workflow():
             if 'anomalies' in st.session_state.agent_results:
                 st.markdown("### Results")
                 passed = []
+
+                # Get selected checks
+                checks = st.session_state.workflow_data.get('anomaly_checks', {
+                    'mscore': True, 'zscore': True, 'fscore': True,
+                    'sloan': True, 'cfmismatch': True, 'fcftrend': False,
+                    'inventory': False, 'receivables': False
+                })
+
                 for sym, d in st.session_state.agent_results['anomalies'].items():
                     if d.get('has_data'):
-                        m_ok = (d.get('m') or -99) < -1.78
-                        z_ok = (d.get('z') or 0) > 1.8
-                        f_ok = (d.get('f') or 0) >= 5
+                        # Check each enabled metric
+                        check_results = []
+                        all_passed = True
+
+                        if checks.get('mscore', True):
+                            m_ok = (d.get('m') or -99) < -1.78
+                            m_val = f"{d.get('m'):.2f}" if d.get('m') else 'N/A'
+                            check_results.append(f"M: {m_val} {'✓' if m_ok else '✗'}")
+                            all_passed = all_passed and m_ok
+
+                        if checks.get('zscore', True):
+                            z_ok = (d.get('z') or 0) > 1.8
+                            z_val = f"{d.get('z'):.2f}" if d.get('z') else 'N/A'
+                            check_results.append(f"Z: {z_val} {'✓' if z_ok else '✗'}")
+                            all_passed = all_passed and z_ok
+
+                        if checks.get('fscore', True):
+                            f_ok = (d.get('f') or 0) >= 5
+                            f_val = f"{d.get('f')}" if d.get('f') else 'N/A'
+                            check_results.append(f"F: {f_val} {'✓' if f_ok else '✗'}")
+                            all_passed = all_passed and f_ok
+
+                        if checks.get('sloan', True):
+                            sloan = d.get('sloan', 0)
+                            sloan_ok = sloan is not None and abs(sloan) < 0.1
+                            sloan_val = f"{sloan*100:.1f}%" if sloan else 'N/A'
+                            check_results.append(f"Sloan: {sloan_val} {'✓' if sloan_ok else '✗'}")
+                            all_passed = all_passed and sloan_ok
+
+                        # Check for high severity anomalies
                         high_ok = d.get('high', 99) == 0
-                        ok = m_ok and z_ok and high_ok
-                        icon = "✅" if ok else "⚠️"
-                        m_val = f"{d.get('m'):.2f}" if d.get('m') else 'N/A'
-                        z_val = f"{d.get('z'):.2f}" if d.get('z') else 'N/A'
-                        f_val = f"{d.get('f')}" if d.get('f') else 'N/A'
-                        st.markdown(f"{icon} **{sym}** | M: {m_val} {'✓' if m_ok else '✗'} | Z: {z_val} {'✓' if z_ok else '✗'} | F: {f_val} {'✓' if f_ok else '✗'}")
-                        if ok:
+                        all_passed = all_passed and high_ok
+
+                        icon = "✅" if all_passed else "⚠️"
+                        st.markdown(f"{icon} **{sym}** | {' | '.join(check_results)}")
+
+                        if all_passed:
                             passed.append(sym)
                     else:
                         st.markdown(f"ℹ️ **{sym}** | No data | {d.get('valuation', 'N/A')}")
@@ -740,58 +826,104 @@ def show_screener_page():
     st.subheader("2. Set Screening Criteria")
     st.markdown("*Adjust the sliders to set your filtering thresholds*")
 
-    col1, col2, col3 = st.columns(3)
+    # Profitability Metrics
+    st.markdown("#### 📊 Profitability Metrics")
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
         gross_margin = st.slider("Min Gross Margin %", 0, 100, 20, help="Minimum gross margin percentage")
         net_margin = st.slider("Min Net Margin %", -50, 100, 5, help="Minimum net margin percentage")
+
+    with col2:
         roa = st.slider("Min ROA %", -20, 50, 5, help="Minimum return on assets")
         roe = st.slider("Min ROE %", -20, 100, 10, help="Minimum return on equity")
 
-    with col2:
-        revenue_growth = st.slider("Min 5Y Revenue Growth %", -50, 100, 0, help="Minimum 5-year revenue growth rate")
-        eps_growth = st.slider("Min 5Y EPS Growth %", -50, 100, 0, help="Minimum 5-year EPS growth rate")
-        debt_equity = st.slider("Max Debt-to-Equity", 0.0, 5.0, 1.5, 0.1, help="Maximum debt-to-equity ratio")
-
     with col3:
+        roic = st.slider("Min ROIC %", -20, 50, 8, help="Minimum return on invested capital")
+        operating_margin = st.slider("Min Operating Margin %", -50, 100, 5, help="Minimum operating margin")
+
+    with col4:
         fcf_margin = st.slider("Min FCF Margin %", -50, 100, 0, help="Minimum free cash flow margin")
         roic_wacc = st.slider("Min ROIC-WACC", -20, 50, 0, help="Minimum ROIC minus WACC")
+
+    # Growth Metrics
+    st.markdown("#### 📈 Growth Metrics")
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        revenue_growth = st.slider("Min 5Y Revenue Growth %", -50, 100, 0, help="Minimum 5-year revenue growth rate")
+
+    with col2:
+        eps_growth = st.slider("Min 5Y EPS Growth %", -50, 100, 0, help="Minimum 5-year EPS growth rate")
+
+    with col3:
+        fcf_growth = st.slider("Min 5Y FCF Growth %", -100, 200, 0, help="Minimum 5-year FCF growth rate")
+
+    with col4:
         rote_wacc = st.slider("Min ROTE-WACC", -50, 100, 0, help="Minimum ROTE minus WACC")
 
-    # Build criteria dict for AI
+    # Balance Sheet Metrics
+    st.markdown("#### 💰 Balance Sheet & Valuation Metrics")
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        debt_equity = st.slider("Max Debt-to-Equity", 0.0, 5.0, 1.5, 0.1, help="Maximum debt-to-equity ratio")
+
+    with col2:
+        current_ratio = st.slider("Min Current Ratio", 0.0, 5.0, 1.0, 0.1, help="Minimum current ratio (liquidity)")
+
+    with col3:
+        pe_ratio = st.slider("Max P/E Ratio", 0, 100, 50, help="Maximum price-to-earnings ratio (0 = no filter)")
+
+    with col4:
+        pb_ratio = st.slider("Max P/B Ratio", 0.0, 20.0, 5.0, 0.5, help="Maximum price-to-book ratio (0 = no filter)")
+
+    # Build criteria dict for AI report
     criteria_dict = {
         'gross_margin': gross_margin,
         'net_margin': net_margin,
+        'operating_margin': operating_margin,
         'roa': roa,
         'roe': roe,
+        'roic': roic,
         'revenue_growth_5y': revenue_growth,
         'eps_growth_5y': eps_growth,
+        'fcf_growth_5y': fcf_growth,
         'debt_to_equity': debt_equity,
+        'current_ratio': current_ratio,
+        'pe_ratio': pe_ratio if pe_ratio > 0 else None,
+        'pb_ratio': pb_ratio if pb_ratio > 0 else None,
         'fcf_margin': fcf_margin,
         'roic_wacc': roic_wacc,
         'rote_wacc': rote_wacc
     }
 
-    # Column mapping for filtering
+    # Column mapping for filtering (column_name: (operator, threshold, apply_filter))
     criteria_mapping = {
-        'Gross Margin %': ('>=', gross_margin),
-        'Net Margin %': ('>=', net_margin),
-        'ROA %': ('>=', roa),
-        'ROE %': ('>=', roe),
-        '5-Year Revenue Growth Rate (Per Share)': ('>=', revenue_growth),
-        '5-Year EPS without NRI Growth Rate': ('>=', eps_growth),
-        'Debt-to-Equity': ('<=', debt_equity),
-        'FCF Margin %': ('>=', fcf_margin),
-        'ROIC-WACC': ('>=', roic_wacc),
-        'ROTE-WACC': ('>=', rote_wacc)
+        'Gross Margin %': ('>=', gross_margin, True),
+        'Net Margin %': ('>=', net_margin, True),
+        'Operating Margin %': ('>=', operating_margin, True),
+        'ROA %': ('>=', roa, True),
+        'ROE %': ('>=', roe, True),
+        'ROIC %': ('>=', roic, True),
+        '5-Year Revenue Growth Rate (Per Share)': ('>=', revenue_growth, True),
+        '5-Year EPS without NRI Growth Rate': ('>=', eps_growth, True),
+        '5-Year FCF Growth Rate': ('>=', fcf_growth, True),
+        'Debt-to-Equity': ('<=', debt_equity, True),
+        'Current Ratio': ('>=', current_ratio, True),
+        'PE Ratio': ('<=', pe_ratio, pe_ratio > 0),  # Only apply if not 0
+        'PB Ratio': ('<=', pb_ratio, pb_ratio > 0),  # Only apply if not 0
+        'FCF Margin %': ('>=', fcf_margin, True),
+        'ROIC-WACC': ('>=', roic_wacc, True),
+        'ROTE-WACC': ('>=', rote_wacc, True)
     }
 
     # Apply filters
     if st.button("🔍 Screen Stocks", type="primary"):
         filtered_df = df.copy()
 
-        for col, (op, threshold) in criteria_mapping.items():
-            if col in filtered_df.columns:
+        for col, (op, threshold, apply_filter) in criteria_mapping.items():
+            if apply_filter and col in filtered_df.columns:
                 filtered_df[col] = pd.to_numeric(filtered_df[col], errors='coerce')
                 if op == '>=':
                     filtered_df = filtered_df[filtered_df[col] >= threshold]
