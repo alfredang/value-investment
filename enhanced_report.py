@@ -152,8 +152,8 @@ Write as a senior analyst providing insights to portfolio managers. Be specific 
 VALUATION METRICS:
 - Earnings Power Value (EPV): ${metrics['epv']}M
 - Market Capitalization: ${metrics['market_cap']}M
-- EPV/Market Cap Ratio: {epv_mc_ratio:.2f if epv_mc_ratio else 'N/A'}
-- Implied Margin of Safety: {margin_of_safety:+.1f}% if margin_of_safety else 'N/A'}
+- EPV/Market Cap Ratio: {f'{epv_mc_ratio:.2f}' if epv_mc_ratio else 'N/A'}
+- Implied Margin of Safety: {f'{margin_of_safety:+.1f}%' if margin_of_safety else 'N/A'}
 - Current Valuation Status: {metrics['valuation']}
 
 Analyze:
@@ -169,8 +169,8 @@ Be specific about upside/downside scenarios."""
     risk_prompt = f"""Provide a comprehensive risk assessment (2-3 paragraphs) for {symbol}.
 
 RISK INDICATORS:
-- Beneish M-Score: {metrics['m_score']:.2f if metrics['m_score'] else 'N/A'} (Manipulation Risk: {manipulation_risk})
-- Altman Z-Score: {metrics['z_score']:.2f if metrics['z_score'] else 'N/A'} (Bankruptcy Risk: {bankruptcy_risk})
+- Beneish M-Score: {f"{metrics['m_score']:.2f}" if metrics['m_score'] else 'N/A'} (Manipulation Risk: {manipulation_risk})
+- Altman Z-Score: {f"{metrics['z_score']:.2f}" if metrics['z_score'] else 'N/A'} (Bankruptcy Risk: {bankruptcy_risk})
 - Piotroski F-Score: {metrics['f_score']} (Financial Strength: {financial_strength})
 - Debt-to-Equity: {metrics['debt_equity']}
 
@@ -187,7 +187,7 @@ Be balanced but highlight genuine concerns."""
     thesis_prompt = f"""Write a clear investment thesis (2 paragraphs) for {symbol} ({company}).
 
 KEY FACTS:
-- Valuation: {metrics['valuation']} (EPV/MC: {epv_mc_ratio:.2f if epv_mc_ratio else 'N/A'})
+- Valuation: {metrics['valuation']} (EPV/MC: {f"{epv_mc_ratio:.2f}" if epv_mc_ratio else 'N/A'})
 - ROE: {metrics['roe']}% | Gross Margin: {metrics['gross_margin']}%
 - Risk Profile: M-Score {manipulation_risk}, Z-Score {bankruptcy_risk}, F-Score {financial_strength}
 - Growth: Revenue {metrics['rev_growth']}% | EPS {metrics['eps_growth']}%
