@@ -1250,11 +1250,12 @@ def show_anomaly_page():
     # Try to read the file
     try:
         import xlrd
-        # Save uploaded file temporarily
-        with open("/tmp/anomaly_data.xls", "wb") as f:
+        # Save uploaded file with correct name that DataLoader expects
+        temp_file_path = "/tmp/Companies with anomalies.xls"
+        with open(temp_file_path, "wb") as f:
             f.write(anomaly_file.getvalue())
 
-        book = xlrd.open_workbook("/tmp/anomaly_data.xls", ignore_workbook_corruption=True)
+        book = xlrd.open_workbook(temp_file_path, ignore_workbook_corruption=True)
         available_symbols = []
         for sheet_name in book.sheet_names():
             parts = sheet_name.split('_')
