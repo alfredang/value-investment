@@ -18,11 +18,16 @@ from anomaly_detector import AnomalyDetector, Severity
 from data_loader import DataLoader
 
 # Try to import AI agents
+AI_IMPORT_ERROR = None
 try:
     from ai_agents import ValueInvestmentAgent, ScreeningAgent, AnomalyAgent, ResearchAgent
     AI_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     AI_AVAILABLE = False
+    AI_IMPORT_ERROR = str(e)
+except Exception as e:
+    AI_AVAILABLE = False
+    AI_IMPORT_ERROR = str(e)
 
 # Try to import report generator
 try:
@@ -123,7 +128,8 @@ def get_ai_agent(agent_type: str = "general"):
             elif agent_type == "anomaly":
                 return AnomalyAgent()
             else:
-                return ValueInvestmentAgent()
+                # Use ResearchAgent as default - it has all capabilities without handoff issues
+                return ResearchAgent()
         except Exception as e:
             st.error(f"Error initializing AI agent: {e}")
     return None
@@ -132,14 +138,14 @@ def get_ai_agent(agent_type: str = "general"):
 def show_persistent_chat():
     """Show persistent AI chat at the bottom of every page."""
     st.markdown("---")
+    st.markdown("### 💬 AI Assistant")
 
-    # Expandable chat section
-    with st.expander("💬 AI Assistant", expanded=False):
-        # Initialize chat history
-        if 'persistent_chat_messages' not in st.session_state:
-            st.session_state.persistent_chat_messages = []
+    # Initialize chat history
+    if 'persistent_chat_messages' not in st.session_state:
+        st.session_state.persistent_chat_messages = []
 
-        # Display chat messages
+    # Display chat messages in a container with fixed height
+    if st.session_state.persistent_chat_messages:
         chat_container = st.container()
         with chat_container:
             for message in st.session_state.persistent_chat_messages[-5:]:  # Show last 5 messages
@@ -148,61 +154,97 @@ def show_persistent_chat():
                 else:
                     st.markdown(f"**AI:** {message['content']}")
 
-        # Chat input
-        agent = get_ai_agent("general")
-        if agent:
-            with st.form("persistent_chat_form", clear_on_submit=True):
-                user_input = st.text_input(
-                    "Ask anything about value investing...",
-                    placeholder="e.g., What makes a stock undervalued?",
-                    key="persistent_chat_input",
-                    label_visibility="collapsed"
-                )
-                col1, col2 = st.columns([5, 1])
-                with col2:
-                    submitted = st.form_submit_button("Send", type="primary", use_container_width=True)
+    # Check for API key
+    api_key = st.session_state.get('openai_api_key', '') or os.getenv('OPENAI_API_KEY', '')
 
-            if submitted and user_input and user_input.strip():
-                # Add user message
-                st.session_state.persistent_chat_messages.append({
-                    "role": "user",
-                    "content": user_input
-                })
+    if api_key:
+        with st.form("persistent_chat_form", clear_on_submit=True):
+            user_input = st.text_input(
+                "Ask anything about value investing...",
+                placeholder="e.g., What makes a stock undervalued?",
+                key="persistent_chat_input",
+                label_visibility="collapsed"
+            )
+            col1, col2 = st.columns([5, 1])
+            with col2:
+                submitted = st.form_submit_button("Send", type="primary", use_container_width=True)
 
-                # Get AI response
-                with st.spinner("Thinking..."):
-                    try:
-                        # Add context from current session
-                        context = user_input
-                        if 'screened_stocks' in st.session_state and len(st.session_state['screened_stocks']) > 0:
-                            context = f"Context: User has {len(st.session_state['screened_stocks'])} screened stocks. Question: {user_input}"
+        if submitted and user_input and user_input.strip():
+            # Add user message
+            st.session_state.persistent_chat_messages.append({
+                "role": "user",
+                "content": user_input
+            })
 
-                        response = agent.chat(context)
-                        st.session_state.persistent_chat_messages.append({
-                            "role": "assistant",
-                            "content": response.content
-                        })
-                    except Exception as e:
-                        st.session_state.persistent_chat_messages.append({
-                            "role": "assistant",
-                            "content": f"Sorry, I encountered an error: {str(e)}"
-                        })
+            # Get AI response using direct OpenAI client (no agents SDK)
+            with st.spinner("Thinking..."):
+                try:
+                    from openai import OpenAI
+
+                    client = OpenAI(api_key=api_key)
+
+                    # Build context from session
+                    system_prompt = """You are a helpful value investing assistant. You help users:
+- Understand value investing principles (margin of safety, intrinsic value, EPV)
+- Interpret financial metrics (M-Score, Z-Score, F-Score, ROE, etc.)
+- Analyze stocks for potential red flags
+- Make informed investment decisions
+
+Be concise but thorough. Use specific numbers when available."""
+
+                    # Add context from current session
+                    context_info = ""
+                    if 'workflow_data' in st.session_state:
+                        if st.session_state.workflow_data.get('filtered_df') is not None:
+                            df = st.session_state.workflow_data['filtered_df']
+                            context_info += f"\nUser has screened {len(df)} stocks."
+                        if st.session_state.workflow_data.get('selected'):
+                            context_info += f"\nSelected for analysis: {', '.join(st.session_state.workflow_data['selected'])}"
+                        if st.session_state.workflow_data.get('final'):
+                            context_info += f"\nFinal candidates: {', '.join(st.session_state.workflow_data['final'])}"
+
+                    if context_info:
+                        system_prompt += f"\n\nCurrent session context:{context_info}"
+
+                    # Build messages for API
+                    messages = [{"role": "system", "content": system_prompt}]
+
+                    # Add recent conversation history
+                    for msg in st.session_state.persistent_chat_messages[-6:]:
+                        messages.append({"role": msg["role"], "content": msg["content"]})
+
+                    # Get model from session state or default
+                    model = st.session_state.get('llm_model', 'gpt-4o-mini')
+
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=1000,
+                        temperature=0.7
+                    )
+
+                    assistant_message = response.choices[0].message.content
+
+                    st.session_state.persistent_chat_messages.append({
+                        "role": "assistant",
+                        "content": assistant_message
+                    })
+                except Exception as e:
+                    st.session_state.persistent_chat_messages.append({
+                        "role": "assistant",
+                        "content": f"Sorry, I encountered an error: {str(e)}"
+                    })
+            st.rerun()
+
+        # Clear chat button
+        if st.session_state.persistent_chat_messages:
+            if st.button("Clear Chat", key="clear_persistent_chat"):
+                st.session_state.persistent_chat_messages = []
                 st.rerun()
-
-            # Clear chat button
-            if st.session_state.persistent_chat_messages:
-                if st.button("Clear Chat", key="clear_persistent_chat"):
-                    st.session_state.persistent_chat_messages = []
-                    st.rerun()
-        else:
-            # Show appropriate message based on what's missing
-            api_key = st.session_state.get('openai_api_key', '') or os.getenv('OPENAI_API_KEY', '')
-            if not AI_AVAILABLE:
-                st.warning("AI agents module not available. Check openai-agents package installation.")
-            elif not api_key:
-                st.info("Enter OpenAI API key in Settings to enable AI Assistant")
-            else:
-                st.warning("AI initialization failed. Check API key validity.")
+    else:
+        # Show chat input disabled
+        st.text_input("Ask anything...", disabled=True, placeholder="Configure API key first")
+        st.caption("Enter OpenAI API key in ⚙️ Settings to enable AI Assistant")
 
 
 def main():
@@ -238,43 +280,113 @@ def main():
 
 
 def show_tabbed_workflow():
-    """Show the 3-step workflow with tabs - each tab runs an agent."""
+    """Show the 3-step workflow with step navigation."""
 
     # Initialize session state
     if 'workflow_data' not in st.session_state:
         st.session_state.workflow_data = {}
     if 'agent_results' not in st.session_state:
         st.session_state.agent_results = {}
+    if 'current_step' not in st.session_state:
+        st.session_state.current_step = 1
 
-    # Create tabs
-    tab1, tab2, tab3 = st.tabs([
-        "📊 Step 1: Screen Stocks",
-        "🔍 Step 2: Anomaly Review",
-        "📝 Step 3: Report"
-    ])
+    # Progress indicator
+    step1_done = st.session_state.agent_results.get('screened', False) and st.session_state.workflow_data.get('selected')
+    step2_done = st.session_state.workflow_data.get('final', [])
+    current = st.session_state.current_step
+
+    # Custom CSS for clickable step tabs
+    st.markdown("""
+    <style>
+    div[data-testid="column"] > div > div > div > div > button {
+        border-radius: 12px 12px 0 0 !important;
+        padding: 20px !important;
+        font-size: 16px !important;
+        font-weight: bold !important;
+        border: none !important;
+        transition: all 0.3s ease !important;
+    }
+    div[data-testid="column"] > div > div > div > div > button:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # Clickable step tabs
+    col1, col2, col3 = st.columns(3)
+
+    # Step 1 button
+    with col1:
+        step1_icon = '✅' if step1_done and current != 1 else '📊'
+        step1_label = f"{step1_icon} STEP 1: Companies Screening"
+        if current == 1:
+            st.button(step1_label, key="nav1", use_container_width=True, type="primary")
+        elif step1_done:
+            if st.button(step1_label, key="nav1", use_container_width=True, type="secondary"):
+                st.session_state.current_step = 1
+                st.rerun()
+        else:
+            if st.button(step1_label, key="nav1", use_container_width=True, type="secondary"):
+                st.session_state.current_step = 1
+                st.rerun()
+
+    # Step 2 button
+    with col2:
+        step2_icon = '✅' if step2_done and current != 2 else '🔍'
+        step2_label = f"{step2_icon} STEP 2: Anomaly Analysis"
+        if current == 2:
+            st.button(step2_label, key="nav2", use_container_width=True, type="primary")
+        elif step2_done:
+            if st.button(step2_label, key="nav2", use_container_width=True, type="secondary"):
+                st.session_state.current_step = 2
+                st.rerun()
+        else:
+            if st.button(step2_label, key="nav2", use_container_width=True, type="secondary"):
+                st.session_state.current_step = 2
+                st.rerun()
+
+    # Step 3 button
+    with col3:
+        step3_icon = '📝'
+        step3_label = f"{step3_icon} STEP 3: Summary Report"
+        if current == 3:
+            st.button(step3_label, key="nav3", use_container_width=True, type="primary")
+        else:
+            if st.button(step3_label, key="nav3", use_container_width=True, type="secondary"):
+                st.session_state.current_step = 3
+                st.rerun()
+
+    st.markdown("---")
 
     # ===========================================
-    # TAB 1: SCREEN STOCKS
+    # STEP 1: SCREEN STOCKS
     # ===========================================
-    with tab1:
-        st.markdown("### Upload data and set screening criteria")
+    if current == 1:
+        st.markdown("### 📊 Companies Screening: Upload data and set screening criteria")
 
         col1, col2 = st.columns(2)
         with col1:
-            screener_file = st.file_uploader("Screener CSV", type=['csv'], key="tab_screener")
-            if screener_file:
+            screener_files = st.file_uploader("Screener CSV (US/SG)", type=['csv'], key="step1_screener", accept_multiple_files=True)
+            if screener_files:
                 try:
-                    df = pd.read_csv(screener_file, encoding='utf-8-sig')
-                    df.columns = df.columns.str.strip()
-                    st.session_state.workflow_data['screener_df'] = df
-                    st.success(f"✓ Loaded {len(df)} stocks")
-                    market = st.radio("Market", ["US", "SG"], horizontal=True)
-                    st.session_state.workflow_data['market'] = market
+                    dfs = []
+                    for f in screener_files:
+                        df = pd.read_csv(f, encoding='utf-8-sig')
+                        df.columns = df.columns.str.strip()
+                        if 'US' in f.name.upper():
+                            df['Market'] = 'US'
+                        elif 'SG' in f.name.upper():
+                            df['Market'] = 'SG'
+                        dfs.append(df)
+                    combined_df = pd.concat(dfs, ignore_index=True)
+                    st.session_state.workflow_data['screener_df'] = combined_df
+                    st.success(f"✓ Loaded {len(combined_df)} stocks from {len(screener_files)} file(s)")
                 except Exception as e:
                     st.error(f"Error: {e}")
 
         with col2:
-            fin_file = st.file_uploader("Financials XLS (for anomalies)", type=['xls', 'xlsx'], key="tab_fin")
+            fin_file = st.file_uploader("Financials XLS (optional)", type=['xls', 'xlsx'], key="step1_fin")
             if fin_file:
                 try:
                     import xlrd
@@ -300,7 +412,6 @@ def show_tabbed_workflow():
 
             if st.button("🔍 Screen Stocks", type="primary"):
                 df = st.session_state.workflow_data['screener_df'].copy()
-                # Apply filters
                 for col, op, val in [('Gross Margin %', '>=', gm), ('ROE %', '>=', roe),
                                       ('Debt-to-Equity', '<=', de), ('FCF Margin %', '>=', fcf),
                                       ('ROIC-WACC', '>=', roic)]:
@@ -308,7 +419,6 @@ def show_tabbed_workflow():
                         df[col] = pd.to_numeric(df[col], errors='coerce')
                         df = df[df[col] >= val] if op == '>=' else df[(df[col] <= val) & (df[col] >= 0)]
 
-                # Add valuation
                 if 'Earnings Power Value (EPV)' in df.columns and 'Market Cap ($M)' in df.columns:
                     df['EPV/MC'] = pd.to_numeric(df['Earnings Power Value (EPV)'], errors='coerce') / pd.to_numeric(df['Market Cap ($M)'], errors='coerce')
                     df['Valuation'] = df['EPV/MC'].apply(lambda x: 'Undervalued' if x and x > 1.3 else 'Fair' if x and x >= 0.7 else 'Overvalued' if x else 'N/A')
@@ -322,65 +432,267 @@ def show_tabbed_workflow():
             cols = ['Symbol', 'Company', 'Valuation', 'ROE %', 'Debt-to-Equity']
             st.dataframe(df[[c for c in cols if c in df.columns]].head(30), use_container_width=True)
 
+            all_symbols = df['Symbol'].tolist()
             available = st.session_state.workflow_data.get('available_symbols', [])
-            analyzable = [s for s in df['Symbol'].tolist() if s in available]
-            if analyzable:
-                selected = st.multiselect("Select for anomaly analysis:", analyzable, analyzable[:5])
+
+            if all_symbols:
+                with_data = [s for s in all_symbols if s in available]
+                without_data = [s for s in all_symbols if s not in available]
+
+                if without_data and not available:
+                    st.info("💡 Upload Financials XLS (optional) for detailed anomaly scores")
+                elif without_data:
+                    st.caption(f"ℹ️ {len(with_data)} have financials data, {len(without_data)} will have limited analysis")
+
+                default_selection = (with_data[:5] if with_data else all_symbols[:5])
+                selected = st.multiselect("Select companies for Anomaly Analysis:", all_symbols, default_selection)
                 st.session_state.workflow_data['selected'] = selected
 
+                if selected:
+                    st.success(f"✅ {len(selected)} companies selected")
+                    st.markdown("---")
+                    col1, col2 = st.columns([3, 1])
+                    with col2:
+                        if st.button("➡️ Move to Anomaly Analysis", type="primary", use_container_width=True):
+                            st.session_state.current_step = 2
+                            st.rerun()
+
     # ===========================================
-    # TAB 2: ANOMALY REVIEW
+    # STEP 2: ANOMALY REVIEW
     # ===========================================
-    with tab2:
+    elif current == 2:
         selected = st.session_state.workflow_data.get('selected', [])
+        available = st.session_state.workflow_data.get('available_symbols', [])
+
         if not selected:
-            st.info("Complete Step 1 first")
+            st.warning("⚠️ No companies selected. Go back to Companies Screening.")
+            if st.button("← Back to Companies Screening"):
+                st.session_state.current_step = 1
+                st.rerun()
         else:
+            st.markdown(f"### 🔍 Anomaly Analysis: Review Financial Red Flags")
+            st.markdown(f"**{len(selected)} companies:** {', '.join(selected)}")
+
+            st.markdown("""
+            | Criterion | Pass | Description |
+            |-----------|------|-------------|
+            | **M-Score** | < -1.78 | No earnings manipulation |
+            | **Z-Score** | > 1.8 | Not in distress zone |
+            | **F-Score** | >= 5 | Strong financials |
+            """)
+
             if st.button("🔍 Run Anomaly Detection", type="primary"):
                 results = {}
-                for sym in selected:
+                progress = st.progress(0)
+                for i, sym in enumerate(selected):
+                    progress.progress((i + 1) / len(selected))
                     try:
-                        loader = DataLoader("/tmp")
-                        detector = AnomalyDetector(loader)
-                        r = detector.analyze(sym)
-                        results[sym] = {'m': r.m_score, 'z': r.z_score, 'f': r.f_score, 'risk': r.risk_level,
-                                       'high': len([a for a in r.anomalies if a.severity == Severity.HIGH])}
-                    except:
-                        pass
+                        if sym in available:
+                            loader = DataLoader("/tmp")
+                            detector = AnomalyDetector(loader)
+                            r = detector.analyze(sym)
+                            results[sym] = {
+                                'm': r.m_score, 'z': r.z_score, 'f': r.f_score,
+                                'risk': r.risk_level, 'has_data': True,
+                                'high': len([a for a in r.anomalies if a.severity == Severity.HIGH])
+                            }
+                        else:
+                            df = st.session_state.workflow_data.get('filtered_df')
+                            if df is not None and sym in df['Symbol'].values:
+                                row = df[df['Symbol'] == sym].iloc[0]
+                                results[sym] = {
+                                    'm': None, 'z': None, 'f': None,
+                                    'risk': 'Unknown', 'has_data': False, 'high': 0,
+                                    'roe': row.get('ROE %'), 'de': row.get('Debt-to-Equity'),
+                                    'valuation': row.get('Valuation', 'N/A')
+                                }
+                    except Exception:
+                        results[sym] = {'m': None, 'z': None, 'f': None, 'risk': 'Error', 'has_data': False, 'high': 0}
+                progress.empty()
                 st.session_state.agent_results['anomalies'] = results
 
             if 'anomalies' in st.session_state.agent_results:
+                st.markdown("### Results")
                 passed = []
                 for sym, d in st.session_state.agent_results['anomalies'].items():
-                    ok = (d.get('m') or -99) < -1.78 and (d.get('z') or 0) > 1.8 and d.get('high', 99) == 0
-                    icon = "✅" if ok else "❌"
-                    st.markdown(f"{icon} **{sym}** - M:{d.get('m','N/A'):.1f}, Z:{d.get('z','N/A'):.1f}, Risk:{d.get('risk','N/A')}")
-                    if ok:
+                    if d.get('has_data'):
+                        m_ok = (d.get('m') or -99) < -1.78
+                        z_ok = (d.get('z') or 0) > 1.8
+                        f_ok = (d.get('f') or 0) >= 5
+                        high_ok = d.get('high', 99) == 0
+                        ok = m_ok and z_ok and high_ok
+                        icon = "✅" if ok else "⚠️"
+                        m_val = f"{d.get('m'):.2f}" if d.get('m') else 'N/A'
+                        z_val = f"{d.get('z'):.2f}" if d.get('z') else 'N/A'
+                        f_val = f"{d.get('f')}" if d.get('f') else 'N/A'
+                        st.markdown(f"{icon} **{sym}** | M: {m_val} {'✓' if m_ok else '✗'} | Z: {z_val} {'✓' if z_ok else '✗'} | F: {f_val} {'✓' if f_ok else '✗'}")
+                        if ok:
+                            passed.append(sym)
+                    else:
+                        st.markdown(f"ℹ️ **{sym}** | No data | {d.get('valuation', 'N/A')}")
                         passed.append(sym)
-                st.session_state.workflow_data['final'] = passed or list(st.session_state.agent_results['anomalies'].keys())
+
+                st.markdown("---")
+                final_candidates = list(st.session_state.agent_results['anomalies'].keys())
+                final_selection = st.multiselect("Select for final report:", final_candidates, passed if passed else final_candidates[:3])
+                st.session_state.workflow_data['final'] = final_selection
+
+                if final_selection:
+                    st.success(f"✅ {len(final_selection)} companies ready")
+                    col1, col2, col3 = st.columns([2, 1, 1])
+                    with col2:
+                        if st.button("← Back", use_container_width=True):
+                            st.session_state.current_step = 1
+                            st.rerun()
+                    with col3:
+                        if st.button("➡️ Move to Summary Report", type="primary", use_container_width=True):
+                            st.session_state.current_step = 3
+                            st.rerun()
 
     # ===========================================
-    # TAB 3: REPORT
+    # STEP 3: GENERATE SUMMARY REPORT
     # ===========================================
-    with tab3:
+    elif current == 3:
         final = st.session_state.workflow_data.get('final', [])
         if not final:
-            st.info("Complete Step 2 first")
+            st.warning("⚠️ No companies selected. Go back to Anomaly Analysis.")
+            if st.button("← Back to Anomaly Analysis"):
+                st.session_state.current_step = 2
+                st.rerun()
         else:
-            st.markdown(f"### Report for {len(final)} companies")
+            st.markdown(f"### 📝 Summary Report: Investment Analysis")
+            st.markdown(f"**{len(final)} companies passed all screening criteria**")
+
+            # Build detailed report data
+            report_data = []
             for sym in final:
                 df = st.session_state.workflow_data.get('filtered_df')
                 anom = st.session_state.agent_results.get('anomalies', {}).get(sym, {})
                 stock = df[df['Symbol'] == sym].iloc[0].to_dict() if df is not None and sym in df['Symbol'].values else {}
-                with st.expander(f"📊 {sym} - {stock.get('Company', '')}"):
-                    st.markdown(f"- Valuation: {stock.get('Valuation', 'N/A')}")
-                    st.markdown(f"- Risk: {anom.get('risk', 'N/A')}")
-                    st.markdown(f"- M-Score: {anom.get('m', 'N/A')}")
-                    agent = get_ai_agent()
-                    if agent and st.button(f"Get AI Analysis for {sym}", key=f"ai_{sym}"):
-                        with st.spinner("Analyzing..."):
-                            resp = agent.chat(f"Brief investment thesis for {sym}: valuation {stock.get('Valuation')}, risk {anom.get('risk')}")
-                            st.markdown(resp.content)
+                report_data.append({
+                    'symbol': sym,
+                    'company': stock.get('Company', 'N/A'),
+                    'valuation': stock.get('Valuation', 'N/A'),
+                    'risk': anom.get('risk', 'N/A'),
+                    'm_score': anom.get('m'),
+                    'z_score': anom.get('z'),
+                    'f_score': anom.get('f'),
+                    'roe': stock.get('ROE %'),
+                    'gross_margin': stock.get('Gross Margin %'),
+                    'net_margin': stock.get('Net Margin %'),
+                    'debt_equity': stock.get('Debt-to-Equity'),
+                    'fcf_margin': stock.get('FCF Margin %'),
+                    'epv': stock.get('Earnings Power Value (EPV)'),
+                    'market_cap': stock.get('Market Cap ($M)'),
+                })
+
+            # Summary table
+            summary_df = pd.DataFrame([{
+                'Symbol': d['symbol'],
+                'Company': d['company'],
+                'Valuation': d['valuation'],
+                'Risk': d['risk'],
+                'M-Score': f"{d['m_score']:.2f}" if d['m_score'] else 'N/A',
+                'Z-Score': f"{d['z_score']:.2f}" if d['z_score'] else 'N/A',
+            } for d in report_data])
+            st.dataframe(summary_df, use_container_width=True)
+
+            st.markdown("---")
+            st.markdown("### Detailed Company Analysis")
+
+            for data in report_data:
+                with st.expander(f"📊 {data['symbol']} - {data['company']}", expanded=True):
+                    # Valuation section
+                    st.markdown("#### Valuation Assessment")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        val_color = "🟢" if data['valuation'] == 'Undervalued' else "🟡" if data['valuation'] == 'Fair' else "🔴"
+                        st.markdown(f"**Status:** {val_color} {data['valuation']}")
+                    with col2:
+                        st.markdown(f"**EPV:** ${data['epv']}M" if data['epv'] else "**EPV:** N/A")
+                    with col3:
+                        st.markdown(f"**Market Cap:** ${data['market_cap']}M" if data['market_cap'] else "**Market Cap:** N/A")
+
+                    # Risk section
+                    st.markdown("#### Risk Analysis")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        m_status = "✅ Pass" if data['m_score'] and data['m_score'] < -1.78 else "⚠️ Flag"
+                        m_score_str = f"{data['m_score']:.2f}" if data['m_score'] is not None else "N/A"
+                        st.markdown(f"**M-Score:** {m_score_str} ({m_status})")
+                    with col2:
+                        z_status = "✅ Safe" if data['z_score'] and data['z_score'] > 1.8 else "⚠️ Distress"
+                        z_score_str = f"{data['z_score']:.2f}" if data['z_score'] is not None else "N/A"
+                        st.markdown(f"**Z-Score:** {z_score_str} ({z_status})")
+                    with col3:
+                        f_status = "✅ Strong" if data['f_score'] and data['f_score'] >= 5 else "⚠️ Weak"
+                        f_score_str = str(data['f_score']) if data['f_score'] is not None else "N/A"
+                        st.markdown(f"**F-Score:** {f_score_str} ({f_status})")
+
+                    # Fundamentals section
+                    st.markdown("#### Key Fundamentals")
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("ROE", f"{data['roe']}%" if data['roe'] else "N/A")
+                    with col2:
+                        st.metric("Gross Margin", f"{data['gross_margin']}%" if data['gross_margin'] else "N/A")
+                    with col3:
+                        st.metric("Net Margin", f"{data['net_margin']}%" if data['net_margin'] else "N/A")
+                    with col4:
+                        st.metric("Debt/Equity", f"{data['debt_equity']}" if data['debt_equity'] else "N/A")
+
+            st.markdown("---")
+
+            # Generate PDF Report
+            col1, col2 = st.columns([2, 2])
+            with col1:
+                if st.button("← Back to Anomaly Analysis"):
+                    st.session_state.current_step = 2
+                    st.rerun()
+            with col2:
+                if st.button("📄 Generate AI-Enhanced Professional Report", type="primary", use_container_width=True):
+                    # Check for API key
+                    api_key = st.session_state.get('openai_api_key', '') or os.getenv('OPENAI_API_KEY', '')
+                    if not api_key:
+                        st.error("OpenAI API key required for AI-enhanced report generation. Please configure in sidebar.")
+                    else:
+                        try:
+                            from enhanced_report import generate_professional_report
+                            from datetime import datetime
+
+                            # Get screening criteria for report
+                            criteria = st.session_state.workflow_data.get('criteria', {})
+
+                            # Progress container
+                            progress_container = st.empty()
+                            progress_bar = st.progress(0)
+
+                            def update_progress(message):
+                                progress_container.text(message)
+
+                            # Generate AI-enhanced report
+                            with st.spinner("Generating AI-enhanced professional report... This may take a few minutes for deep analysis."):
+                                buffer = generate_professional_report(
+                                    report_data=report_data,
+                                    criteria=criteria,
+                                    api_key=api_key,
+                                    progress_callback=update_progress
+                                )
+
+                            progress_bar.progress(100)
+                            progress_container.empty()
+
+                            st.download_button(
+                                label="📥 Download AI-Enhanced Professional Report (DOCX)",
+                                data=buffer,
+                                file_name=f"Value_Investment_AI_Report_{datetime.now().strftime('%Y%m%d')}.docx",
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            )
+                            st.success("✅ AI-enhanced professional report generated! Click above to download.")
+                        except Exception as e:
+                            st.error(f"Error generating report: {e}")
+                            import traceback
+                            st.code(traceback.format_exc())
 
 
 def show_screener_page():
