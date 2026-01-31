@@ -1,8 +1,8 @@
-# Value Investment Tool
+# Value Investment Academy
 
 An AI-powered Python tool for value investors with stock screening, automated valuation, and financial anomaly detection for US and Singapore markets.
 
-**[🚀 Try the Live Demo](https://value-investment.streamlit.app)** *(Deploy your own to use)*
+**[🚀 Try the Live Demo](https://value-investment-academy.streamlit.app)**
 
 ## Features
 

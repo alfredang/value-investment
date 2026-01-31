@@ -7,6 +7,7 @@ Provides advanced analysis features:
 - Deep dive anomaly validation with context
 - Rigorous company selection criteria
 """
+from __future__ import annotations
 import os
 import json
 from dataclasses import dataclass, field
