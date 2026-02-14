@@ -48,8 +48,9 @@ def generate_ai_analysis(client, prompt: str, max_tokens: int = 1500) -> str:
 def generate_executive_summary(client, report_data: List[Dict], criteria: Dict) -> str:
     """Generate AI-powered executive summary."""
     undervalued = [d for d in report_data if d.get('valuation') == 'Undervalued']
-    low_risk = [d for d in report_data if d.get('m_score') and d['m_score'] < -1.78]
-    strong_f = [d for d in report_data if d.get('f_score') and d['f_score'] >= 5]
+    clean_companies = [d for d in report_data if d.get('ai_rating') == 'CLEAN']
+    minor_companies = [d for d in report_data if d.get('ai_rating') == 'MINOR']
+    material_companies = [d for d in report_data if d.get('ai_rating') == 'MATERIAL']
 
     # Calculate average metrics
     avg_roe = sum(d.get('roe', 0) or 0 for d in report_data) / max(len(report_data), 1)
@@ -62,8 +63,9 @@ def generate_executive_summary(client, report_data: List[Dict], criteria: Dict) 
 PORTFOLIO OVERVIEW:
 - Total companies analyzed: {len(report_data)}
 - Undervalued opportunities (EPV/MC > 1.3): {len(undervalued)} companies
-- Low manipulation risk (M-Score < -1.78): {len(low_risk)} companies
-- Strong fundamentals (F-Score ≥ 5): {len(strong_f)} companies
+- Clean financials (no anomalies): {len(clean_companies)} companies
+- Minor anomalies detected: {len(minor_companies)} companies
+- Material distortions found: {len(material_companies)} companies
 - Average ROE across universe: {avg_roe:.1f}%
 - Average Gross Margin: {avg_margin:.1f}%
 
@@ -97,9 +99,8 @@ def generate_company_deep_dive(client, company_data: Dict) -> Dict[str, str]:
         'valuation': company_data.get('valuation', 'N/A'),
         'epv': company_data.get('epv'),
         'market_cap': company_data.get('market_cap'),
-        'm_score': company_data.get('m_score'),
-        'z_score': company_data.get('z_score'),
-        'f_score': company_data.get('f_score'),
+        'ai_rating': company_data.get('ai_rating', 'N/A'),
+        'ai_analysis': company_data.get('ai_analysis', ''),
         'roe': company_data.get('roe'),
         'gross_margin': company_data.get('gross_margin'),
         'net_margin': company_data.get('net_margin'),
@@ -120,10 +121,9 @@ def generate_company_deep_dive(client, company_data: Dict) -> Dict[str, str]:
         except:
             pass
 
-    # Risk flags
-    manipulation_risk = "LOW" if metrics['m_score'] and metrics['m_score'] < -1.78 else "ELEVATED"
-    bankruptcy_risk = "LOW" if metrics['z_score'] and metrics['z_score'] > 1.8 else "ELEVATED"
-    financial_strength = "STRONG" if metrics['f_score'] and metrics['f_score'] >= 5 else "WEAK"
+    # Risk flags from AI anomaly analysis
+    ai_rating = metrics.get('ai_rating', 'N/A')
+    anomaly_risk = "LOW" if ai_rating == 'CLEAN' else "MODERATE" if ai_rating == 'MINOR' else "ELEVATED"
 
     # Business Analysis
     business_prompt = f"""Provide a concise business analysis (2-3 paragraphs) for {symbol} ({company}).
@@ -166,16 +166,20 @@ Be specific about upside/downside scenarios."""
     valuation_analysis = generate_ai_analysis(client, valuation_prompt, max_tokens=600)
 
     # Risk Assessment
+    ai_analysis_excerpt = metrics.get('ai_analysis', '')[:500] if metrics.get('ai_analysis') else 'No AI anomaly analysis available.'
+
     risk_prompt = f"""Provide a comprehensive risk assessment (2-3 paragraphs) for {symbol}.
 
 RISK INDICATORS:
-- Beneish M-Score: {f"{metrics['m_score']:.2f}" if metrics['m_score'] else 'N/A'} (Manipulation Risk: {manipulation_risk})
-- Altman Z-Score: {f"{metrics['z_score']:.2f}" if metrics['z_score'] else 'N/A'} (Bankruptcy Risk: {bankruptcy_risk})
-- Piotroski F-Score: {metrics['f_score']} (Financial Strength: {financial_strength})
+- AI Anomaly Rating: {ai_rating} (Anomaly Risk: {anomaly_risk})
 - Debt-to-Equity: {metrics['debt_equity']}
+- ROIC-WACC Spread: {metrics.get('roic_wacc', 'N/A')}
+
+AI ANOMALY ANALYSIS FINDINGS:
+{ai_analysis_excerpt}
 
 Analyze:
-1. What these risk scores tell us about earnings quality and financial stability
+1. What the AI anomaly findings tell us about earnings quality and financial consistency
 2. Specific red flags or concerns investors should monitor
 3. Mitigating factors or reasons for confidence
 
@@ -189,7 +193,7 @@ Be balanced but highlight genuine concerns."""
 KEY FACTS:
 - Valuation: {metrics['valuation']} (EPV/MC: {f"{epv_mc_ratio:.2f}" if epv_mc_ratio else 'N/A'})
 - ROE: {metrics['roe']}% | Gross Margin: {metrics['gross_margin']}%
-- Risk Profile: M-Score {manipulation_risk}, Z-Score {bankruptcy_risk}, F-Score {financial_strength}
+- AI Anomaly Rating: {ai_rating} ({anomaly_risk} risk)
 - Growth: Revenue {metrics['rev_growth']}% | EPS {metrics['eps_growth']}%
 
 Write a compelling investment thesis that:
@@ -214,19 +218,19 @@ def generate_ceo_analysis(client, report_data: List[Dict]) -> str:
 
     # Aggregate management quality signals from the data
     high_roe_companies = [d for d in report_data if d.get('roe') and d['roe'] > 15]
-    high_f_score = [d for d in report_data if d.get('f_score') and d['f_score'] >= 7]
+    clean_financials = [d for d in report_data if d.get('ai_rating') == 'CLEAN']
     low_debt = [d for d in report_data if d.get('debt_equity') and d['debt_equity'] < 0.5]
 
     prompt = f"""Write a professional analysis (3-4 paragraphs) of management quality indicators across the analyzed companies.
 
 DATA POINTS:
 - Companies with ROE > 15% (indicates capital discipline): {len(high_roe_companies)}
-- Companies with F-Score ≥ 7 (indicates operational excellence): {len(high_f_score)}
+- Companies with clean financials (no anomalies): {len(clean_financials)}
 - Companies with D/E < 0.5 (indicates conservative financing): {len(low_debt)}
 - Total companies analyzed: {len(report_data)}
 
-Top performers by F-Score: {', '.join([d['symbol'] for d in sorted(report_data, key=lambda x: x.get('f_score') or 0, reverse=True)[:3]])}
 Top performers by ROE: {', '.join([d['symbol'] for d in sorted(report_data, key=lambda x: x.get('roe') or 0, reverse=True)[:3]])}
+Companies with cleanest financials: {', '.join([d['symbol'] for d in clean_financials[:3]]) if clean_financials else 'None'}
 
 Provide analysis on:
 1. What these quantitative signals tell us about management quality across the portfolio
@@ -250,15 +254,17 @@ def generate_portfolio_recommendations(client, report_data: List[Dict]) -> str:
             score += 3
         elif d.get('valuation') == 'Fair':
             score += 1
-        if d.get('m_score') and d['m_score'] < -1.78:
-            score += 2
-        if d.get('z_score') and d['z_score'] > 2.5:
-            score += 2
-        if d.get('f_score') and d['f_score'] >= 7:
-            score += 2
-        elif d.get('f_score') and d['f_score'] >= 5:
+        # AI anomaly rating scoring
+        ai_rating = d.get('ai_rating', '')
+        if ai_rating == 'CLEAN':
+            score += 3
+        elif ai_rating == 'MINOR':
             score += 1
         if d.get('roe') and d['roe'] > 15:
+            score += 2
+        elif d.get('roe') and d['roe'] > 10:
+            score += 1
+        if d.get('roic_wacc') and d['roic_wacc'] > 5:
             score += 1
         ranked.append({**d, 'composite_score': score})
 
@@ -266,7 +272,7 @@ def generate_portfolio_recommendations(client, report_data: List[Dict]) -> str:
 
     top_picks = ranked[:5]
     top_picks_summary = "\n".join([
-        f"- {d['symbol']}: Score {d['composite_score']}/10, {d.get('valuation', 'N/A')}, ROE {d.get('roe')}%, F-Score {d.get('f_score')}"
+        f"- {d['symbol']}: Score {d['composite_score']}/10, {d.get('valuation', 'N/A')}, ROE {d.get('roe')}%, AI Rating: {d.get('ai_rating', 'N/A')}"
         for d in top_picks
     ])
 
@@ -478,16 +484,18 @@ def generate_professional_report(
     doc.add_heading('Key Metrics at a Glance', level=2)
 
     undervalued = [d for d in report_data if d.get('valuation') == 'Undervalued']
-    low_risk = [d for d in report_data if d.get('m_score') and d['m_score'] < -1.78]
-    strong_f = [d for d in report_data if d.get('f_score') and d['f_score'] >= 5]
+    clean = [d for d in report_data if d.get('ai_rating') == 'CLEAN']
+    minor = [d for d in report_data if d.get('ai_rating') == 'MINOR']
+    material = [d for d in report_data if d.get('ai_rating') == 'MATERIAL']
 
     add_styled_table(doc,
         ['Metric', 'Count', 'Percentage'],
         [
             ['Total Companies Screened', str(len(report_data)), '100%'],
             ['Undervalued (EPV/MC > 1.3)', str(len(undervalued)), f'{len(undervalued)*100//max(len(report_data),1)}%'],
-            ['Low Manipulation Risk (M < -1.78)', str(len(low_risk)), f'{len(low_risk)*100//max(len(report_data),1)}%'],
-            ['Strong Fundamentals (F ≥ 5)', str(len(strong_f)), f'{len(strong_f)*100//max(len(report_data),1)}%']
+            ['Clean Financials (No Anomalies)', str(len(clean)), f'{len(clean)*100//max(len(report_data),1)}%'],
+            ['Minor Anomalies Detected', str(len(minor)), f'{len(minor)*100//max(len(report_data),1)}%'],
+            ['Material Distortions Found', str(len(material)), f'{len(material)*100//max(len(report_data),1)}%']
         ]
     )
 
@@ -543,14 +551,14 @@ def generate_professional_report(
             d.get('symbol', 'N/A'),
             str(d.get('company', 'N/A'))[:20],
             d.get('valuation', 'N/A'),
-            fmt_score(d.get('m_score')),
-            fmt_score(d.get('z_score')),
-            str(d.get('f_score')) if d.get('f_score') else 'N/A',
-            fmt_pct(d.get('roe'))
+            d.get('ai_rating', 'N/A'),
+            fmt_pct(d.get('roe')),
+            fmt_pct(d.get('gross_margin')),
+            fmt_pct(d.get('fcf_margin'))
         ])
 
     add_styled_table(doc,
-        ['Symbol', 'Company', 'Valuation', 'M-Score', 'Z-Score', 'F-Score', 'ROE'],
+        ['Symbol', 'Company', 'Valuation', 'AI Rating', 'ROE', 'Gross Margin', 'FCF Margin'],
         results_rows
     )
 
@@ -584,13 +592,13 @@ def generate_professional_report(
                 pass
 
         add_styled_table(doc,
-            ['EPV', 'Market Cap', 'EPV/MC Ratio', 'Valuation', 'F-Score'],
+            ['EPV', 'Market Cap', 'EPV/MC Ratio', 'Valuation', 'AI Rating'],
             [[
                 fmt_money(company_data.get('epv')),
                 fmt_money(company_data.get('market_cap')),
                 f"{epv_mc_ratio:.2f}" if epv_mc_ratio else 'N/A',
                 company_data.get('valuation', 'N/A'),
-                str(company_data.get('f_score')) if company_data.get('f_score') else 'N/A'
+                company_data.get('ai_rating', 'N/A')
             ]]
         )
 
@@ -629,24 +637,35 @@ def generate_professional_report(
         # Risk Assessment Section
         doc.add_heading('Risk Assessment', level=3)
 
-        # Risk indicators table
-        m_score = company_data.get('m_score')
-        z_score = company_data.get('z_score')
-        f_score = company_data.get('f_score')
-
+        # AI anomaly analysis summary
+        ai_rating = company_data.get('ai_rating', 'N/A')
+        rating_desc = {
+            'CLEAN': 'No significant distortions detected',
+            'MINOR': 'Minor one-offs detected, not material to valuation',
+            'MATERIAL': 'Material distortions found, EPV adjustment may be needed'
+        }
         add_styled_table(doc,
-            ['Risk Metric', 'Value', 'Threshold', 'Assessment'],
+            ['Assessment', 'Rating', 'Description'],
             [
-                ['M-Score (Manipulation)', fmt_score(m_score), '< -1.78',
-                 'PASS' if m_score and m_score < -1.78 else 'FLAG'],
-                ['Z-Score (Bankruptcy)', fmt_score(z_score), '> 1.8',
-                 'SAFE' if z_score and z_score > 1.8 else 'CAUTION'],
-                ['F-Score (Strength)', str(f_score) if f_score else 'N/A', '≥ 5',
-                 'STRONG' if f_score and f_score >= 5 else 'WEAK']
+                ['AI Anomaly Analysis', ai_rating,
+                 rating_desc.get(ai_rating, 'Analysis not available')],
+                ['Debt-to-Equity', str(company_data.get('debt_equity', 'N/A')),
+                 'Balance sheet leverage indicator'],
+                ['ROIC-WACC Spread', str(company_data.get('roic_wacc', 'N/A')),
+                 'Value creation above cost of capital']
             ]
         )
 
         doc.add_paragraph("")
+
+        # Include AI anomaly findings if available
+        ai_anomaly_text = company_data.get('ai_analysis', '')
+        if ai_anomaly_text:
+            doc.add_heading('AI Anomaly Findings', level=3)
+            for para in ai_anomaly_text.split('\n\n'):
+                if para.strip():
+                    doc.add_paragraph(para.strip())
+            doc.add_paragraph("")
 
         for para in ai_analysis['risk_analysis'].split('\n\n'):
             if para.strip():
@@ -692,33 +711,33 @@ def generate_professional_report(
     doc.add_heading('Management Quality Indicators by Company', level=2)
 
     mgmt_rows = []
-    for d in sorted(report_data, key=lambda x: (x.get('f_score') or 0, x.get('roe') or 0), reverse=True):
-        f_score = d.get('f_score')
+    for d in sorted(report_data, key=lambda x: (x.get('roe') or 0), reverse=True):
         roe = d.get('roe')
+        ai_rating = d.get('ai_rating', 'N/A')
 
-        if f_score and f_score >= 7:
+        if ai_rating == 'CLEAN' and roe and roe > 15:
             quality = "HIGH"
-            signal = "Strong operational execution"
-        elif f_score and f_score >= 5 and roe and roe > 12:
+            signal = "Strong execution, clean financials"
+        elif ai_rating in ('CLEAN', 'MINOR') and roe and roe > 10:
             quality = "ABOVE AVG"
             signal = "Good capital discipline"
-        elif f_score and f_score >= 4:
+        elif ai_rating == 'MATERIAL':
+            quality = "CAUTION"
+            signal = "Material distortions, requires scrutiny"
+        else:
             quality = "AVERAGE"
             signal = "Monitor execution"
-        else:
-            quality = "BELOW AVG"
-            signal = "Requires scrutiny"
 
         mgmt_rows.append([
             d.get('symbol', 'N/A'),
             quality,
-            str(f_score) if f_score else 'N/A',
+            ai_rating,
             fmt_pct(roe),
             signal
         ])
 
     add_styled_table(doc,
-        ['Symbol', 'Quality Rating', 'F-Score', 'ROE', 'Key Signal'],
+        ['Symbol', 'Quality Rating', 'AI Rating', 'ROE', 'Key Signal'],
         mgmt_rows
     )
 
@@ -755,20 +774,21 @@ def generate_professional_report(
 
     rec_rows = []
     for d in report_data:
-        m_ok = bool(d.get('m_score') and d['m_score'] < -1.78)
-        z_ok = bool(d.get('z_score') and d['z_score'] > 1.8)
-        f_ok = bool(d.get('f_score') and d['f_score'] >= 5)
+        ai_clean = d.get('ai_rating') == 'CLEAN'
+        ai_minor = d.get('ai_rating') == 'MINOR'
+        ai_ok = ai_clean or ai_minor
         underval = d.get('valuation') == 'Undervalued'
+        strong_roe = bool(d.get('roe') and d['roe'] > 15)
 
-        score = sum([m_ok, z_ok, f_ok, underval])
+        score = sum([ai_clean, ai_ok, underval, strong_roe])
 
-        if score >= 3 and underval:
+        if underval and ai_clean and strong_roe:
             rating = "STRONG BUY"
             action = "Initiate 3-5% position"
-        elif score >= 2 and underval:
+        elif underval and ai_ok:
             rating = "BUY"
             action = "Initiate 2-3% position"
-        elif d.get('valuation') == 'Fair' and score >= 2:
+        elif d.get('valuation') == 'Fair' and ai_ok:
             rating = "HOLD"
             action = "Monitor for entry"
         else:
@@ -809,9 +829,9 @@ def generate_professional_report(
         ['Metric', 'Purpose', 'Threshold', 'Interpretation'],
         [
             ['EPV/Market Cap', 'Intrinsic value assessment', '> 1.3', 'Undervalued with margin of safety'],
-            ['Beneish M-Score', 'Earnings manipulation detection', '< -1.78', 'Low manipulation probability'],
-            ['Altman Z-Score', 'Bankruptcy risk assessment', '> 1.8', 'Financially stable'],
-            ['Piotroski F-Score', 'Financial strength scoring', '≥ 5', 'Strong fundamentals']
+            ['AI Anomaly Rating', 'Detect one-off financial distortions', 'CLEAN', 'No material distortions in 10Y history'],
+            ['ROIC - WACC', 'Value creation spread', '> 0', 'Creating value above cost of capital'],
+            ['ROE', 'Capital efficiency', '> 15%', 'Strong returns on equity']
         ]
     )
 

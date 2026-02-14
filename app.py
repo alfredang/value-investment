@@ -56,6 +56,23 @@ try:
 except ImportError:
     ENHANCED_AVAILABLE = False
 
+# Import FMP API client
+try:
+    from fmp_api import FMPClient
+    FMP_AVAILABLE = True
+except ImportError:
+    FMP_AVAILABLE = False
+
+
+def get_fmp_client():
+    """Initialize FMP client if API key is configured."""
+    fmp_key = os.getenv('FMP_API_KEY', '')
+    if fmp_key and FMP_AVAILABLE:
+        if 'fmp_client' not in st.session_state:
+            st.session_state.fmp_client = FMPClient(fmp_key)
+        return st.session_state.fmp_client
+    return None
+
 # Page configuration
 st.set_page_config(
     page_title="Value Investment Academy",
@@ -64,28 +81,483 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS - theme compatible
+# Custom CSS - Professional Dark Theme
 st.markdown("""
 <style>
+    :root {
+        --primary: #1a1a2e;
+        --secondary: #16213e;
+        --accent: #0f3460;
+        --success: #10b981;
+        --danger: #ef4444;
+        --warning: #f59e0b;
+        --text-primary: #f8fafc;
+        --text-secondary: #cbd5e1;
+        --border: #334155;
+    }
+    
+    * {
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    
+    /* Main container */
+    .main {
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    }
+    
+    /* Metrics cards */
     .stMetric {
-        padding: 15px;
-        border-radius: 8px;
-        border: 1px solid rgba(128, 128, 128, 0.2);
+        padding: 20px !important;
+        border-radius: 12px !important;
+        border: 1px solid rgba(51, 65, 85, 0.5) !important;
+        background: linear-gradient(135deg, rgba(30, 41, 59, 0.8), rgba(15, 23, 42, 0.8)) !important;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3) !important;
     }
+    
     .stMetric label {
-        color: inherit !important;
+        color: #cbd5e1 !important;
+        font-size: 12px !important;
+        font-weight: 600 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.5px !important;
     }
+    
     .stMetric [data-testid="stMetricValue"] {
-        color: inherit !important;
+        color: #f8fafc !important;
+        font-size: 24px !important;
+        font-weight: 700 !important;
     }
+    
+    /* Stock cards */
+    .stock-card {
+        padding: 20px !important;
+        border-radius: 12px !important;
+        border: 1px solid rgba(51, 65, 85, 0.5) !important;
+        background: linear-gradient(135deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.9)) !important;
+        box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4) !important;
+        margin-bottom: 12px !important;
+    }
+    
+    /* Stock symbol header */
+    .stock-symbol {
+        font-size: 20px !important;
+        font-weight: 700 !important;
+        color: #f8fafc !important;
+    }
+    
+    .stock-company {
+        font-size: 12px !important;
+        color: #cbd5e1 !important;
+        margin-top: 4px !important;
+    }
+    
+    /* Positive/Negative indicators */
+    .metric-positive {
+        color: #10b981 !important;
+    }
+    
+    .metric-negative {
+        color: #ef4444 !important;
+    }
+    
+    .metric-neutral {
+        color: #f59e0b !important;
+    }
+    
+    /* AI Analysis box */
     .ai-analysis {
-        padding: 20px;
-        border-radius: 10px;
-        border-left: 4px solid #0066cc;
-        background-color: rgba(0, 102, 204, 0.1);
+        padding: 20px !important;
+        border-radius: 12px !important;
+        border-left: 4px solid #0f3460 !important;
+        background: linear-gradient(135deg, rgba(15, 52, 96, 0.1), rgba(15, 23, 42, 0.8)) !important;
+        background-color: rgba(0, 102, 204, 0.08) !important;
+    }
+    
+    /* Tab styling */
+    .stTabs [data-baseweb="tab-list"] button {
+        border-radius: 12px 12px 0 0 !important;
+        padding: 16px 24px !important;
+        font-size: 14px !important;
+        font-weight: 600 !important;
+        border: 1px solid rgba(51, 65, 85, 0.3) !important;
+        color: #cbd5e1 !important;
+        background: rgba(30, 41, 59, 0.5) !important;
+        transition: all 0.3s ease !important;
+    }
+    
+    .stTabs [data-baseweb="tab-list"] button:hover {
+        background: rgba(30, 41, 59, 0.8) !important;
+        color: #f8fafc !important;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, rgba(15, 52, 96, 0.8), rgba(15, 23, 42, 0.9)) !important;
+        border-color: rgba(16, 185, 129, 0.3) !important;
+        color: #10b981 !important;
+    }
+    
+    /* Expander styling */
+    .streamlit-expanderHeader {
+        background: linear-gradient(135deg, rgba(30, 41, 59, 0.7), rgba(15, 23, 42, 0.8)) !important;
+        border: 1px solid rgba(51, 65, 85, 0.3) !important;
+        border-radius: 8px !important;
+    }
+    
+    .streamlit-expanderHeader:hover {
+        background: linear-gradient(135deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.9)) !important;
+    }
+    
+    /* Buttons */
+    .stButton > button {
+        padding: 12px 24px !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+        transition: all 0.3s ease !important;
+        border: 1px solid rgba(51, 65, 85, 0.5) !important;
+        background: linear-gradient(135deg, #0f3460, #0a1e35) !important;
+    }
+    
+    .stButton > button:hover {
+        background: linear-gradient(135deg, #1e5a96, #0f3460) !important;
+        box-shadow: 0 8px 16px rgba(15, 212, 243, 0.2) !important;
+    }
+    
+    [data-testid="baseButton-primary"] {
+        background: linear-gradient(135deg, #10b981, #059669) !important;
+    }
+    
+    [data-testid="baseButton-primary"]:hover {
+        background: linear-gradient(135deg, #34d399, #10b981) !important;
+        box-shadow: 0 8px 16px rgba(16, 185, 129, 0.3) !important;
+    }
+    
+    /* Section headings */
+    h1, h2, h3 {
+        color: #f8fafc !important;
+    }
+    
+    h2 {
+        border-bottom: 2px solid rgba(16, 185, 129, 0.3) !important;
+        padding-bottom: 12px !important;
+    }
+    
+    /* Divider */
+    hr {
+        border-color: rgba(51, 65, 85, 0.3) !important;
+    }
+    
+    /* Data table */
+    [data-testid="stDataFrame"] {
+        background: rgba(15, 23, 42, 0.8) !important;
+        border-radius: 8px !important;
+        overflow: hidden !important;
     }
 </style>
 """, unsafe_allow_html=True)
+
+
+def _fmt(val, suffix='%', decimals=1):
+    """Format a numeric value for display."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return 'N/A'
+    try:
+        return f"{float(val):.{decimals}f}{suffix}"
+    except (ValueError, TypeError):
+        return 'N/A'
+
+
+def _metric_color(val, good_thresh, ok_thresh=None, lower_better=False):
+    """Return hex color based on value vs thresholds."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return '#cbd5e1'
+    try:
+        v = float(val)
+    except (ValueError, TypeError):
+        return '#cbd5e1'
+    if lower_better:
+        if v < good_thresh:
+            return '#10b981'
+        if ok_thresh is not None and v < ok_thresh:
+            return '#f59e0b'
+        return '#ef4444'
+    else:
+        if v > good_thresh:
+            return '#10b981'
+        if ok_thresh is not None and v > ok_thresh:
+            return '#f59e0b'
+        return '#ef4444'
+
+
+def _progress_bar_html(value, label, min_val=-20, max_val=50):
+    """Render an HTML progress bar for ROIC-WACC / ROTE-WACC."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return f"<div style='font-size:11px;color:#cbd5e1;margin-bottom:4px;'>{label}: N/A</div>"
+    try:
+        v = float(value)
+    except (ValueError, TypeError):
+        return f"<div style='font-size:11px;color:#cbd5e1;margin-bottom:4px;'>{label}: N/A</div>"
+    pct = max(0, min(100, (v - min_val) / (max_val - min_val) * 100))
+    bar_color = '#10b981' if v > 0 else '#ef4444'
+    val_color = '#10b981' if v > 0 else '#ef4444'
+    sign = '+' if v > 0 else ''
+    return f"""<div style='margin-bottom:6px;'>
+        <div style='font-size:11px;color:#94a3b8;margin-bottom:2px;'>{label}</div>
+        <div style='display:flex;align-items:center;gap:8px;'>
+            <div style='flex:1;height:8px;background:rgba(51,65,85,0.5);border-radius:4px;overflow:hidden;'>
+                <div style='width:{pct:.0f}%;height:100%;background:{bar_color};border-radius:4px;'></div>
+            </div>
+            <span style='color:{val_color};font-weight:600;font-size:12px;min-width:55px;text-align:right;'>{sign}{v:.1f}%</span>
+        </div>
+    </div>"""
+
+
+def _metric_cell(label, value, suffix='%', good=None, ok=None, lower_better=False):
+    """Build HTML for a single metric cell in a card grid."""
+    color = _metric_color(value, good, ok, lower_better) if good is not None else '#cbd5e1'
+    display = _fmt(value, suffix)
+    return f"""<div>
+        <div style='font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:0.3px;'>{label}</div>
+        <div style='font-size:13px;font-weight:600;color:{color};'>{display}</div>
+    </div>"""
+
+
+def render_stock_card(symbol: str, company: str, data: dict, card_index: int = 0):
+    """Render an enhanced stock card showing all 10 screening metrics."""
+    valuation = data.get('Valuation', 'N/A')
+    current_price = data.get('Current Price')
+    epv = data.get('Earnings Power Value (EPV)')
+
+    # All 10 metrics
+    gross_margin = data.get('Gross Margin %')
+    net_margin = data.get('Net Margin %')
+    roa = data.get('ROA %')
+    roe = data.get('ROE %')
+    rev_growth = data.get('5-Year Revenue Growth Rate (Per Share)')
+    eps_growth = data.get('5-Year EPS without NRI Growth Rate')
+    debt_equity = data.get('Debt-to-Equity')
+    fcf_margin = data.get('FCF Margin %')
+    roic_wacc = data.get('ROIC-WACC')
+    rote_wacc = data.get('ROTE-WACC')
+
+    # Valuation badge
+    val_map = {
+        'Undervalued': ('#10b981', '#052e16'),
+        'Fair': ('#f59e0b', '#451a03'),
+        'Fair Value': ('#f59e0b', '#451a03'),
+        'Overvalued': ('#ef4444', '#450a0a'),
+    }
+    val_fg, val_bg = val_map.get(valuation, ('#cbd5e1', '#1e293b'))
+
+    # Buy price (EPV * user-defined discount)
+    mos_discount = st.session_state.get('_v_mos_discount', 0.7)
+    buy_price = None
+    if epv is not None:
+        try:
+            buy_price = float(epv) * mos_discount
+        except (ValueError, TypeError):
+            pass
+
+    price_str = f"${float(current_price):.2f}" if current_price else "N/A"
+    buy_str = f"${buy_price:.2f}" if buy_price else "N/A"
+
+    company_display = (company[:40] + '...') if company and len(company) > 40 else (company or 'N/A')
+
+    # Build metric cells
+    m1 = _metric_cell('Gross Margin', gross_margin, good=30, ok=15)
+    m2 = _metric_cell('Net Margin', net_margin, good=10, ok=5)
+    m3 = _metric_cell('ROA', roa, good=10, ok=5)
+    m4 = _metric_cell('ROE', roe, good=15, ok=10)
+    m5 = _metric_cell('5Y Rev Growth', rev_growth, good=10, ok=0)
+    m6 = _metric_cell('5Y EPS Growth', eps_growth, good=10, ok=0)
+    m7 = _metric_cell('Debt/Equity', debt_equity, suffix='x', good=1.0, ok=1.5, lower_better=True)
+    m8 = _metric_cell('FCF Margin', fcf_margin, good=10, ok=5)
+
+    roic_bar = _progress_bar_html(roic_wacc, 'ROIC-WACC')
+    rote_bar = _progress_bar_html(rote_wacc, 'ROTE-WACC', min_val=-50, max_val=100)
+
+    card_html = f"""
+    <div style='padding:16px 20px;border-radius:10px;border:1px solid rgba(51,65,85,0.4);
+                background:linear-gradient(135deg,rgba(30,41,59,0.95),rgba(15,23,42,0.95));
+                margin-bottom:10px;box-shadow:0 4px 12px rgba(0,0,0,0.3);'>
+        <!-- Row 1: Ticker + Company + Valuation badge -->
+        <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;'>
+            <div style='display:flex;align-items:baseline;gap:12px;'>
+                <span style='font-size:20px;font-weight:800;color:#f8fafc;letter-spacing:0.5px;'>{symbol}</span>
+                <span style='font-size:12px;color:#94a3b8;'>{company_display}</span>
+                <span style='font-size:16px;font-weight:700;color:#f8fafc;'>{price_str}</span>
+            </div>
+            <div style='display:flex;align-items:center;gap:12px;'>
+                <span style='font-size:11px;color:#94a3b8;'>Buy: {buy_str}</span>
+                <span style='background:{val_bg};color:{val_fg};padding:4px 12px;border-radius:4px;
+                             font-size:11px;font-weight:700;text-transform:uppercase;border:1px solid {val_fg};'>
+                    {valuation}
+                </span>
+            </div>
+        </div>
+        <!-- Row 2: All 10 metrics in a grid -->
+        <div style='display:grid;grid-template-columns:repeat(5, 1fr);gap:8px 12px;'>
+            {m1}{m2}{m3}{m4}{m5}
+            {m6}{m7}{m8}
+            <div>{roic_bar}</div>
+            <div>{rote_bar}</div>
+        </div>
+    </div>
+    """
+    st.markdown(card_html, unsafe_allow_html=True)
+
+    # View Trends button
+    if st.button("View Trends", key=f"view_{symbol}_{card_index}", help=f"View detailed analysis for {symbol}"):
+        st.session_state[f'show_detail_{symbol}'] = True
+        st.rerun()
+
+
+def show_company_detail_popup(symbol: str, data: dict):
+    """Display detailed company information in an expander. Uses FMP API for enrichment."""
+    with st.expander(f"📊 {symbol} - {data.get('Company', 'N/A')} | Detailed Analysis", expanded=True):
+        # Section 1: Core metrics from CSV
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Sector", data.get('Sector', 'N/A'))
+        with col2:
+            st.metric("Industry", data.get('Industry', 'N/A'))
+        with col3:
+            mc = data.get('Market Cap ($M)')
+            st.metric("Market Cap", f"${mc:,.0f}M" if mc else "N/A")
+        with col4:
+            epv = data.get('Earnings Power Value (EPV)')
+            st.metric("EPV", f"${float(epv):,.0f}M" if epv else "N/A")
+
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            cp = data.get('Current Price')
+            st.metric("Price", f"${float(cp):.2f}" if cp else "N/A")
+        with col2:
+            val = data.get('Valuation', 'N/A')
+            emoji = {'Undervalued': '🟢', 'Fair': '🟡', 'Fair Value': '🟡', 'Overvalued': '🔴'}.get(val, '⚪')
+            st.metric("Valuation", f"{emoji} {val}")
+        with col3:
+            hi = data.get('Highest Intrinsic Value')
+            st.metric("Highest IV", f"${float(hi):,.0f}M" if hi else "N/A")
+        with col4:
+            lo = data.get('Lowest Intrinsic Value')
+            st.metric("Lowest IV", f"${float(lo):,.0f}M" if lo else "N/A")
+
+        st.markdown("---")
+
+        # Section 2: FMP API enrichment
+        fmp = get_fmp_client()
+        if fmp:
+            # Cache to avoid repeat API calls
+            if 'fmp_cache' not in st.session_state:
+                st.session_state.fmp_cache = {}
+
+            cache_key = f"detail_{symbol}"
+            if cache_key not in st.session_state.fmp_cache:
+                with st.spinner(f"Fetching live data for {symbol}..."):
+                    try:
+                        profile = fmp.get_profile(symbol)
+                        income_stmt = fmp.get_income_statement(symbol, limit=10)
+                        cash_flow_data = fmp.get_cash_flow(symbol, limit=10)
+                        st.session_state.fmp_cache[cache_key] = {
+                            'profile': profile,
+                            'income_stmt': income_stmt,
+                            'cash_flow': cash_flow_data,
+                            'error': None
+                        }
+                    except Exception as e:
+                        st.session_state.fmp_cache[cache_key] = {'error': str(e)}
+
+            cached = st.session_state.fmp_cache[cache_key]
+
+            if cached.get('error'):
+                st.warning(f"Could not fetch FMP data: {cached['error']}")
+            else:
+                profile = cached.get('profile', {})
+                income_stmt = cached.get('income_stmt', pd.DataFrame())
+                cash_flow_data = cached.get('cash_flow', pd.DataFrame())
+
+                # Business description
+                if profile.get('description'):
+                    st.markdown("#### Business Intelligence")
+                    desc = profile['description']
+                    st.write(desc[:600] + '...' if len(desc) > 600 else desc)
+
+                # CEO + Location
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown(f"**CEO:** {profile.get('ceo', 'N/A')}")
+                with col2:
+                    city = profile.get('city', '')
+                    state = profile.get('state', '')
+                    loc = f"{city}, {state}" if city else "N/A"
+                    st.markdown(f"**Location:** {loc}")
+                with col3:
+                    st.markdown(f"**Country:** {profile.get('country', 'N/A')}")
+
+                st.markdown("---")
+
+                # Charts
+                try:
+                    import plotly.graph_objects as go
+
+                    chart_col1, chart_col2 = st.columns(2)
+
+                    # Revenue vs Net Income (10Y)
+                    with chart_col1:
+                        if not income_stmt.empty and 'revenue' in income_stmt.columns:
+                            stmt_sorted = income_stmt.sort_values('date') if 'date' in income_stmt.columns else income_stmt
+                            fig = go.Figure()
+                            fig.add_trace(go.Bar(
+                                x=stmt_sorted['date'], y=stmt_sorted['revenue'] / 1e6,
+                                name='Revenue ($M)', marker_color='#3b82f6', opacity=0.7
+                            ))
+                            fig.add_trace(go.Scatter(
+                                x=stmt_sorted['date'], y=stmt_sorted['netIncome'] / 1e6,
+                                name='Net Income ($M)', mode='lines+markers',
+                                marker_color='#10b981', line=dict(width=3)
+                            ))
+                            fig.update_layout(
+                                title=f"Revenue vs Net Income (10Y)",
+                                height=350, margin=dict(t=40, b=30, l=40, r=20),
+                                legend=dict(orientation="h", y=1.12),
+                                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                                font=dict(color='#cbd5e1'),
+                                xaxis=dict(gridcolor='rgba(51,65,85,0.3)'),
+                                yaxis=dict(gridcolor='rgba(51,65,85,0.3)', title='$M'),
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+
+                    # Free Cash Flow Trend (10Y)
+                    with chart_col2:
+                        if not cash_flow_data.empty and 'freeCashFlow' in cash_flow_data.columns:
+                            cf_sorted = cash_flow_data.sort_values('date') if 'date' in cash_flow_data.columns else cash_flow_data
+                            fcf_vals = cf_sorted['freeCashFlow'] / 1e6
+                            colors = ['#10b981' if v >= 0 else '#ef4444' for v in fcf_vals]
+                            fig2 = go.Figure()
+                            fig2.add_trace(go.Bar(
+                                x=cf_sorted['date'], y=fcf_vals,
+                                name='FCF ($M)', marker_color=colors
+                            ))
+                            fig2.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+                            fig2.update_layout(
+                                title=f"Free Cash Flow Trend (10Y)",
+                                height=350, margin=dict(t=40, b=30, l=40, r=20),
+                                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                                font=dict(color='#cbd5e1'),
+                                xaxis=dict(gridcolor='rgba(51,65,85,0.3)'),
+                                yaxis=dict(gridcolor='rgba(51,65,85,0.3)', title='$M'),
+                            )
+                            st.plotly_chart(fig2, use_container_width=True)
+
+                except ImportError:
+                    st.info("Install plotly for interactive charts: `pip install plotly`")
+
+        else:
+            st.info("💡 Configure `FMP_API_KEY` in .env to unlock: business description, CEO, location, and 10-year financial charts.")
+
+        if st.button("Close", key=f"close_{symbol}"):
+            st.session_state[f'show_detail_{symbol}'] = False
+            st.rerun()
 
 
 def init_config():
@@ -365,6 +837,73 @@ def show_tabbed_workflow():
     if current == 1:
         st.markdown("### 📊 Companies Screening: Upload data and set screening criteria")
 
+        # Valuation methodology + configurable formula
+        with st.expander("⚙️ Valuation Formula Settings", expanded=False):
+            st.markdown("""
+#### How Valuation Works
+
+**Formula:** `Valuation Ratio = EPV / Market Cap`
+
+**EPV** (Earnings Power Value) = (Adjusted Earnings x (1 - Tax Rate)) / WACC
+— a conservative intrinsic value that ignores growth assumptions.
+
+Stocks are classified based on the ratio thresholds you set below:
+            """)
+
+            st.markdown("---")
+            st.markdown("#### Customize Thresholds")
+
+            # Initialize valuation settings in session state
+            if '_v_underval_thresh' not in st.session_state:
+                st.session_state['_v_underval_thresh'] = 1.3
+            if '_v_overval_thresh' not in st.session_state:
+                st.session_state['_v_overval_thresh'] = 0.7
+            if '_v_mos_discount' not in st.session_state:
+                st.session_state['_v_mos_discount'] = 0.7
+
+            vc1, vc2, vc3 = st.columns(3)
+            with vc1:
+                underval_thresh = st.number_input(
+                    "🟢 Undervalued if EPV/MC >",
+                    min_value=0.5, max_value=5.0, step=0.1,
+                    value=st.session_state['_v_underval_thresh'],
+                    key="_underval_thresh_input",
+                    help="Stocks with EPV/MC above this are classified as Undervalued"
+                )
+                st.session_state['_v_underval_thresh'] = underval_thresh
+            with vc2:
+                overval_thresh = st.number_input(
+                    "🔴 Overvalued if EPV/MC <",
+                    min_value=0.1, max_value=2.0, step=0.1,
+                    value=st.session_state['_v_overval_thresh'],
+                    key="_overval_thresh_input",
+                    help="Stocks with EPV/MC below this are classified as Overvalued"
+                )
+                st.session_state['_v_overval_thresh'] = overval_thresh
+            with vc3:
+                mos_discount = st.number_input(
+                    "💰 Buy Price Discount (x EPV)",
+                    min_value=0.1, max_value=1.0, step=0.05,
+                    value=st.session_state['_v_mos_discount'],
+                    key="_mos_discount_input",
+                    help="Lowest Intrinsic Value = EPV x this factor (margin of safety)"
+                )
+                st.session_state['_v_mos_discount'] = mos_discount
+
+            # Preview the current thresholds
+            margin_under = (underval_thresh - 1.0) * 100
+            margin_over = (1.0 - overval_thresh) * 100
+            st.markdown(f"""
+| Status | Condition | Interpretation |
+|--------|-----------|----------------|
+| 🟢 **Undervalued** | EPV/MC > **{underval_thresh:.1f}** | EPV is {margin_under:.0f}%+ above Market Cap |
+| 🟡 **Fair Value** | **{overval_thresh:.1f}** ≤ EPV/MC ≤ **{underval_thresh:.1f}** | Within range — fairly priced |
+| 🔴 **Overvalued** | EPV/MC < **{overval_thresh:.1f}** | EPV is {margin_over:.0f}%+ below Market Cap |
+
+**Buy Price:** Lowest IV = EPV x {mos_discount:.2f} | Highest IV = EPV
+            """)
+
+        # File upload section
         col1, col2 = st.columns(2)
         with col1:
             screener_files = st.file_uploader("Screener CSV (US/SG)", type=['csv'], key="step1_screener", accept_multiple_files=True)
@@ -374,14 +913,36 @@ def show_tabbed_workflow():
                     for f in screener_files:
                         df = pd.read_csv(f, encoding='utf-8-sig')
                         df.columns = df.columns.str.strip()
-                        if 'US' in f.name.upper():
+                        filename_upper = f.name.upper()
+                        if 'US' in filename_upper:
                             df['Market'] = 'US'
-                        elif 'SG' in f.name.upper():
+                            # Standardize exchange names
+                            if 'Exchange' in df.columns:
+                                exchange_map = {'NAS': 'NASDAQ', 'NYSE': 'NYSE', 'AMEX': 'AMEX', 'NASDAQ': 'NASDAQ'}
+                                df['Exchange'] = df['Exchange'].map(exchange_map).fillna(df['Exchange'])
+                        elif 'SG' in filename_upper:
                             df['Market'] = 'SG'
+                            if 'Exchange' not in df.columns or df['Exchange'].isna().all():
+                                df['Exchange'] = 'SGX'
+                        else:
+                            df['Market'] = 'Other'
                         dfs.append(df)
                     combined_df = pd.concat(dfs, ignore_index=True)
+                    combined_df = combined_df.drop_duplicates(subset=['Symbol'], keep='first')
                     st.session_state.workflow_data['screener_df'] = combined_df
-                    st.success(f"✓ Loaded {len(combined_df)} stocks from {len(screener_files)} file(s)")
+
+                    # Upload summary
+                    us_count = len(combined_df[combined_df['Market'] == 'US'])
+                    sg_count = len(combined_df[combined_df['Market'] == 'SG'])
+                    st.success(f"✅ Loaded {len(combined_df)} unique stocks from {len(screener_files)} file(s)")
+                    mcol1, mcol2, mcol3 = st.columns(3)
+                    with mcol1:
+                        st.metric("US Stocks", us_count)
+                    with mcol2:
+                        st.metric("SG Stocks", sg_count)
+                    with mcol3:
+                        exchanges = sorted(combined_df['Exchange'].dropna().unique()) if 'Exchange' in combined_df.columns else []
+                        st.caption(f"Exchanges: {', '.join(exchanges)}" if exchanges else "")
                 except Exception as e:
                     st.error(f"Error: {e}")
 
@@ -395,47 +956,224 @@ def show_tabbed_workflow():
                     book = xlrd.open_workbook("/tmp/Companies with anomalies.xls", ignore_workbook_corruption=True)
                     symbols = [s.split('_')[1] for s in book.sheet_names() if '_' in s]
                     st.session_state.workflow_data['available_symbols'] = symbols
-                    st.success(f"✓ {len(symbols)} companies available")
+                    st.success(f"✅ {len(symbols)} companies with financials data")
                 except Exception as e:
                     st.error(f"Error: {e}")
 
+        # Screening criteria panel
         if 'screener_df' in st.session_state.workflow_data:
             st.markdown("---")
-            col1, col2 = st.columns(2)
-            with col1:
-                gm = st.slider("Min Gross Margin %", 0, 100, 20)
-                roe = st.slider("Min ROE %", -20, 100, 10)
-                de = st.slider("Max Debt/Equity", 0.0, 5.0, 1.5, 0.1)
-            with col2:
-                fcf = st.slider("Min FCF Margin %", -50, 100, 0)
-                roic = st.slider("Min ROIC-WACC", -20, 50, 0)
+            src_df = st.session_state.workflow_data['screener_df']
 
-            if st.button("🔍 Screen Stocks", type="primary"):
-                df = st.session_state.workflow_data['screener_df'].copy()
-                for col, op, val in [('Gross Margin %', '>=', gm), ('ROE %', '>=', roe),
-                                      ('Debt-to-Equity', '<=', de), ('FCF Margin %', '>=', fcf),
-                                      ('ROIC-WACC', '>=', roic)]:
+            # --- Synced slider+input helper ---
+            def _on_slider_change(key):
+                """Slider changed -> push value to number input key."""
+                st.session_state[f'{key}_i'] = st.session_state[f'{key}_s']
+
+            def _on_input_change(key):
+                """Number input changed -> push value to slider key."""
+                st.session_state[f'{key}_s'] = st.session_state[f'{key}_i']
+
+            def synced_criterion(label, key, min_val, max_val, default, step=1, is_float=False):
+                """Render a synced slider + number input pair. Returns the current value."""
+                # Initialize both widget keys to default on first render only
+                if f'{key}_s' not in st.session_state:
+                    st.session_state[f'{key}_s'] = float(default) if is_float else int(default)
+                if f'{key}_i' not in st.session_state:
+                    st.session_state[f'{key}_i'] = float(default) if is_float else int(default)
+
+                st.markdown(f"**{label}**")
+                c1, c2 = st.columns([3, 1])
+                with c1:
+                    if is_float:
+                        st.slider("s", min_value=float(min_val), max_value=float(max_val),
+                                  step=float(step), key=f"{key}_s",
+                                  label_visibility="collapsed",
+                                  on_change=_on_slider_change, args=(key,))
+                    else:
+                        st.slider("s", min_value=int(min_val), max_value=int(max_val),
+                                  step=int(step), key=f"{key}_s",
+                                  label_visibility="collapsed",
+                                  on_change=_on_slider_change, args=(key,))
+                with c2:
+                    if is_float:
+                        st.number_input("n", min_value=float(min_val), max_value=float(max_val),
+                                        step=float(step), key=f"{key}_i",
+                                        label_visibility="collapsed",
+                                        on_change=_on_input_change, args=(key,))
+                    else:
+                        st.number_input("n", min_value=int(min_val), max_value=int(max_val),
+                                        step=int(step), key=f"{key}_i",
+                                        label_visibility="collapsed",
+                                        on_change=_on_input_change, args=(key,))
+                return st.session_state[f'{key}_s']
+
+            # Exchange filter
+            st.markdown("#### 🌍 Market Filter")
+            available_exchanges = sorted(src_df['Exchange'].dropna().unique().tolist()) if 'Exchange' in src_df.columns else []
+            selected_exchanges = st.multiselect(
+                "Filter by Exchange",
+                options=available_exchanges,
+                default=available_exchanges,
+                help="Select one or more exchanges to include"
+            )
+
+            st.markdown("---")
+
+            # Profitability criteria
+            st.markdown("#### 📊 Profitability")
+            p_col1, p_col2 = st.columns(2)
+            with p_col1:
+                gm = synced_criterion("Min Gross Margin %", "gm", 0, 100, 20)
+                nm = synced_criterion("Min Net Margin %", "nm", -50, 100, 5)
+                roa = synced_criterion("Min ROA %", "roa", -20, 50, 5)
+            with p_col2:
+                roe = synced_criterion("Min ROE %", "roe", -20, 100, 10)
+                fcf = synced_criterion("Min FCF Margin %", "fcf", -50, 100, 0)
+
+            st.markdown("---")
+
+            # Growth criteria
+            st.markdown("#### 📈 Growth")
+            g_col1, g_col2 = st.columns(2)
+            with g_col1:
+                rev_growth = synced_criterion("Min 5Y Revenue Growth %", "rev", -50, 100, 0)
+            with g_col2:
+                eps_growth = synced_criterion("Min 5Y EPS Growth %", "eps", -50, 100, 0)
+
+            st.markdown("---")
+
+            # Efficiency criteria
+            st.markdown("#### ⚡ Efficiency")
+            e_col1, e_col2 = st.columns(2)
+            with e_col1:
+                roic = synced_criterion("Min ROIC-WACC", "roic", -20, 50, 0)
+            with e_col2:
+                rote = synced_criterion("Min ROTE-WACC", "rote", -50, 100, 0)
+
+            st.markdown("---")
+
+            # Balance Sheet criteria
+            st.markdown("#### 💰 Balance Sheet")
+            de = synced_criterion("Max Debt-to-Equity", "de", 0.0, 5.0, 1.5, step=0.1, is_float=True)
+
+            st.markdown("---")
+
+            # Screen button
+            if st.button("🔍 Execute Screen", type="primary", use_container_width=True):
+                df = src_df.copy()
+
+                # Exchange filter
+                if selected_exchanges and 'Exchange' in df.columns:
+                    df = df[df['Exchange'].isin(selected_exchanges)]
+
+                # Apply all criteria
+                filter_config = {
+                    'Gross Margin %': ('>=', gm),
+                    'Net Margin %': ('>=', nm),
+                    'ROA %': ('>=', roa),
+                    'ROE %': ('>=', roe),
+                    'FCF Margin %': ('>=', fcf),
+                    '5-Year Revenue Growth Rate (Per Share)': ('>=', rev_growth),
+                    '5-Year EPS without NRI Growth Rate': ('>=', eps_growth),
+                    'ROIC-WACC': ('>=', roic),
+                    'ROTE-WACC': ('>=', rote),
+                    'Debt-to-Equity': ('<=', de),
+                }
+
+                for col, (op, threshold) in filter_config.items():
                     if col in df.columns:
                         df[col] = pd.to_numeric(df[col], errors='coerce')
-                        df = df[df[col] >= val] if op == '>=' else df[(df[col] <= val) & (df[col] >= 0)]
+                        if op == '>=':
+                            df = df[df[col] >= threshold]
+                        else:
+                            df = df[(df[col] <= threshold) & (df[col] >= 0)]
+
+                # Add valuation + intrinsic value columns using user thresholds
+                ut = st.session_state.get('_v_underval_thresh', 1.3)
+                ot = st.session_state.get('_v_overval_thresh', 0.7)
+                md = st.session_state.get('_v_mos_discount', 0.7)
 
                 if 'Earnings Power Value (EPV)' in df.columns and 'Market Cap ($M)' in df.columns:
-                    df['EPV/MC'] = pd.to_numeric(df['Earnings Power Value (EPV)'], errors='coerce') / pd.to_numeric(df['Market Cap ($M)'], errors='coerce')
-                    df['Valuation'] = df['EPV/MC'].apply(lambda x: 'Undervalued' if x and x > 1.3 else 'Fair' if x and x >= 0.7 else 'Overvalued' if x else 'N/A')
+                    df['Earnings Power Value (EPV)'] = pd.to_numeric(df['Earnings Power Value (EPV)'], errors='coerce')
+                    df['Market Cap ($M)'] = pd.to_numeric(df['Market Cap ($M)'], errors='coerce')
+                    df['EPV/MC'] = df['Earnings Power Value (EPV)'] / df['Market Cap ($M)']
+                    df['EPV/MC'] = df['EPV/MC'].replace([float('inf'), float('-inf')], pd.NA)
 
+                    df['Highest Intrinsic Value'] = df['Earnings Power Value (EPV)']
+                    df['Lowest Intrinsic Value'] = df['Earnings Power Value (EPV)'] * md
+                    df['Live Share Price'] = pd.to_numeric(df.get('Current Price'), errors='coerce')
+
+                    df['Valuation'] = df['EPV/MC'].apply(
+                        lambda x: 'Undervalued' if pd.notna(x) and x > ut else
+                                  'Fair' if pd.notna(x) and x >= ot else
+                                  'Overvalued' if pd.notna(x) and x > 0 else 'N/A'
+                    )
+
+                # Store criteria for report
+                st.session_state.workflow_data['criteria'] = {
+                    'exchanges': selected_exchanges,
+                    'gross_margin': gm, 'net_margin': nm, 'roa': roa, 'roe': roe,
+                    'fcf_margin': fcf, 'revenue_growth_5y': rev_growth,
+                    'eps_growth_5y': eps_growth, 'roic_wacc': roic,
+                    'rote_wacc': rote, 'debt_to_equity': de,
+                }
                 st.session_state.workflow_data['filtered_df'] = df
                 st.session_state.agent_results['screened'] = True
 
         if st.session_state.agent_results.get('screened'):
             df = st.session_state.workflow_data['filtered_df']
-            st.metric("Matches", len(df))
-            cols = ['Symbol', 'Company', 'Valuation', 'ROE %', 'Debt-to-Equity']
-            st.dataframe(df[[c for c in cols if c in df.columns]].head(30), use_container_width=True)
+
+            # Results header with count + export
+            hdr_col1, hdr_col2 = st.columns([4, 1])
+            with hdr_col1:
+                st.markdown(f"### 📊 {len(df)} Stocks Found")
+            with hdr_col2:
+                export_cols = ['Symbol', 'Company', 'Exchange', 'Sector', 'Gross Margin %', 'Net Margin %',
+                               'ROE %', 'ROA %', 'Debt-to-Equity', 'FCF Margin %', 'ROIC-WACC', 'ROTE-WACC',
+                               'Market Cap ($M)', 'Highest Intrinsic Value', 'Lowest Intrinsic Value',
+                               'Live Share Price', 'EPV/MC', 'Valuation']
+                avail_export = [c for c in export_cols if c in df.columns]
+                csv_data = df[avail_export].to_csv(index=False)
+                st.download_button("📥 Export CSV", csv_data, "screened_stocks.csv", "text/csv",
+                                   use_container_width=True)
+
+            # Valuation summary metrics
+            m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+            with m_col1:
+                undervalued = len(df[df['Valuation'] == 'Undervalued']) if 'Valuation' in df.columns else 0
+                st.metric("Undervalued", undervalued)
+            with m_col2:
+                fair = len(df[df['Valuation'] == 'Fair']) if 'Valuation' in df.columns else 0
+                st.metric("Fair Value", fair)
+            with m_col3:
+                overvalued = len(df[df['Valuation'] == 'Overvalued']) if 'Valuation' in df.columns else 0
+                st.metric("Overvalued", overvalued)
+            with m_col4:
+                avg_roe = df['ROE %'].mean() if 'ROE %' in df.columns else 0
+                st.metric("Avg ROE", f"{avg_roe:.1f}%")
+
+            st.markdown("---")
+
+            # Display enhanced stock cards
+            for card_idx, (idx, row) in enumerate(df.head(30).iterrows()):
+                row_data = row.to_dict()
+                sym = row.get('Symbol', 'N/A')
+                render_stock_card(
+                    symbol=sym,
+                    company=row.get('Company', 'N/A'),
+                    data=row_data,
+                    card_index=card_idx
+                )
+                # Show company detail if toggled
+                if st.session_state.get(f'show_detail_{sym}', False):
+                    show_company_detail_popup(sym, row_data)
 
             all_symbols = df['Symbol'].tolist()
             available = st.session_state.workflow_data.get('available_symbols', [])
 
             if all_symbols:
+                st.markdown("---")
                 with_data = [s for s in all_symbols if s in available]
                 without_data = [s for s in all_symbols if s not in available]
 
@@ -458,7 +1196,7 @@ def show_tabbed_workflow():
                             st.rerun()
 
     # ===========================================
-    # STEP 2: ANOMALY REVIEW
+    # STEP 2: AI ANOMALY ANALYSIS
     # ===========================================
     elif current == 2:
         selected = st.session_state.workflow_data.get('selected', [])
@@ -470,161 +1208,208 @@ def show_tabbed_workflow():
                 st.session_state.current_step = 1
                 st.rerun()
         else:
-            st.markdown(f"### 🔍 Anomaly Analysis: Review Financial Red Flags")
+            st.markdown("### 🔍 AI Anomaly Analysis: Detect One-Off Financial Distortions")
             st.markdown(f"**{len(selected)} companies:** {', '.join(selected)}")
 
-            # Anomaly Detection Options (Yes/No Toggles)
-            st.markdown("#### 🎚️ Select Anomaly Checks to Run")
+            st.info("AI analyzes 10-year financial history to detect: **business model changes**, "
+                     "**one-off significant expenses/income**, **unusual margin shifts**, "
+                     "**revenue/earnings spikes or drops**, and other distortions that may not reflect "
+                     "the company's normal earning power.")
 
-            col1, col2, col3, col4 = st.columns(4)
+            # Check for API key
+            api_key = st.session_state.get('openai_api_key', '') or os.getenv('OPENAI_API_KEY', '')
+            if not api_key:
+                st.error("OpenAI API key required for AI anomaly analysis. Configure in Settings.")
+            else:
+                if st.button("🤖 Run AI Anomaly Detection", type="primary", use_container_width=True):
+                    results = {}
+                    progress = st.progress(0)
+                    status_text = st.empty()
 
-            with col1:
-                st.markdown("**Earnings Quality**")
-                check_mscore = st.toggle("M-Score (Manipulation)", value=True,
-                    help="Beneish M-Score detects earnings manipulation. Pass if < -1.78")
-                check_sloan = st.toggle("Sloan Ratio (Accruals)", value=True,
-                    help="High accruals (>10%) suggest poor earnings quality")
+                    for i, sym in enumerate(selected):
+                        progress.progress((i + 1) / len(selected))
+                        status_text.text(f"Analyzing {sym} ({i+1}/{len(selected)})...")
 
-            with col2:
-                st.markdown("**Financial Health**")
-                check_zscore = st.toggle("Z-Score (Bankruptcy)", value=True,
-                    help="Altman Z-Score predicts bankruptcy. Safe if > 1.8")
-                check_fscore = st.toggle("F-Score (Strength)", value=True,
-                    help="Piotroski F-Score measures financial strength. Strong if ≥ 5")
+                        # --- Gather 10-year financial data ---
+                        fin_data = None
 
-            with col3:
-                st.markdown("**Cash Flow Analysis**")
-                check_cfmismatch = st.toggle("Cash Flow Mismatch", value=True,
-                    help="Flag if positive net income but negative operating cash flow")
-                check_fcftrend = st.toggle("FCF Trend", value=False,
-                    help="Analyze free cash flow consistency over time")
-
-            with col4:
-                st.markdown("**Balance Sheet**")
-                check_inventory = st.toggle("Inventory Build-up", value=False,
-                    help="Flag if inventory growth exceeds revenue growth")
-                check_receivables = st.toggle("Receivables Growth", value=False,
-                    help="Flag if receivables growth exceeds revenue growth")
-
-            # Store selected checks in session state
-            st.session_state.workflow_data['anomaly_checks'] = {
-                'mscore': check_mscore,
-                'zscore': check_zscore,
-                'fscore': check_fscore,
-                'sloan': check_sloan,
-                'cfmismatch': check_cfmismatch,
-                'fcftrend': check_fcftrend,
-                'inventory': check_inventory,
-                'receivables': check_receivables
-            }
-
-            st.markdown("---")
-            st.markdown("""
-            | Active Check | Pass Threshold | Description |
-            |-----------|------|-------------|""")
-            if check_mscore:
-                st.markdown("| **M-Score** | < -1.78 | No earnings manipulation |")
-            if check_zscore:
-                st.markdown("| **Z-Score** | > 1.8 | Not in distress zone |")
-            if check_fscore:
-                st.markdown("| **F-Score** | ≥ 5 | Strong financials |")
-            if check_sloan:
-                st.markdown("| **Sloan Ratio** | < 10% | Good earnings quality |")
-            if check_cfmismatch:
-                st.markdown("| **CF Mismatch** | Aligned | OCF supports Net Income |")
-
-            if st.button("🔍 Run Anomaly Detection", type="primary"):
-                results = {}
-                progress = st.progress(0)
-                for i, sym in enumerate(selected):
-                    progress.progress((i + 1) / len(selected))
-                    try:
+                        # Source 1: XLS file (if available)
                         if sym in available:
-                            loader = DataLoader("/tmp")
-                            detector = AnomalyDetector(loader)
-                            r = detector.analyze(sym)
-                            results[sym] = {
-                                'm': r.m_score, 'z': r.z_score, 'f': r.f_score,
-                                'risk': r.risk_level, 'has_data': True,
-                                'high': len([a for a in r.anomalies if a.severity == Severity.HIGH])
-                            }
-                        else:
-                            df = st.session_state.workflow_data.get('filtered_df')
-                            if df is not None and sym in df['Symbol'].values:
-                                row = df[df['Symbol'] == sym].iloc[0]
-                                results[sym] = {
-                                    'm': None, 'z': None, 'f': None,
-                                    'risk': 'Unknown', 'has_data': False, 'high': 0,
-                                    'roe': row.get('ROE %'), 'de': row.get('Debt-to-Equity'),
-                                    'valuation': row.get('Valuation', 'N/A')
-                                }
-                    except Exception:
-                        results[sym] = {'m': None, 'z': None, 'f': None, 'risk': 'Error', 'has_data': False, 'high': 0}
-                progress.empty()
-                st.session_state.agent_results['anomalies'] = results
+                            try:
+                                loader = DataLoader("/tmp")
+                                parsed = loader.load_anomaly_data(sym)
+                                if sym in parsed:
+                                    d = parsed[sym]
+                                    periods = d.get('fiscal_periods', [])[:10]
+                                    fin_data = {
+                                        'source': 'XLS',
+                                        'periods': periods,
+                                        'revenue': d.get('income_statement', {}).get('revenue', [])[:10],
+                                        'net_income': d.get('income_statement', {}).get('net_income', [])[:10],
+                                        'gross_profit': d.get('income_statement', {}).get('gross_profit', [])[:10],
+                                        'operating_income': d.get('income_statement', {}).get('operating_income', [])[:10],
+                                        'fcf': d.get('cash_flow', {}).get('free_cash_flow', [])[:10],
+                                        'operating_cf': d.get('cash_flow', {}).get('operating_cash_flow', [])[:10],
+                                        'eps': d.get('per_share_data', {}).get('eps_diluted', [])[:10],
+                                        'eps_nri': d.get('per_share_data', {}).get('eps_without_nri', [])[:10],
+                                        'gross_margin': d.get('ratios', {}).get('gross_margin', [])[:10],
+                                        'net_margin': d.get('ratios', {}).get('net_margin', [])[:10],
+                                        'roe': d.get('ratios', {}).get('roe', [])[:10],
+                                        'debt_to_equity': d.get('ratios', {}).get('debt_to_equity', [])[:10],
+                                    }
+                            except Exception:
+                                pass
 
+                        # Source 2: FMP API (fallback)
+                        if fin_data is None:
+                            fmp = get_fmp_client()
+                            if fmp:
+                                try:
+                                    inc = fmp.get_income_statement(sym, limit=10)
+                                    cf = fmp.get_cash_flow(sym, limit=10)
+                                    if not inc.empty:
+                                        inc_sorted = inc.sort_values('date') if 'date' in inc.columns else inc
+                                        cf_sorted = cf.sort_values('date') if not cf.empty and 'date' in cf.columns else cf
+                                        fin_data = {
+                                            'source': 'FMP',
+                                            'periods': inc_sorted['date'].tolist() if 'date' in inc_sorted.columns else [],
+                                            'revenue': inc_sorted['revenue'].tolist() if 'revenue' in inc_sorted.columns else [],
+                                            'net_income': inc_sorted['netIncome'].tolist() if 'netIncome' in inc_sorted.columns else [],
+                                            'gross_profit': inc_sorted['grossProfit'].tolist() if 'grossProfit' in inc_sorted.columns else [],
+                                            'operating_income': inc_sorted['operatingIncome'].tolist() if 'operatingIncome' in inc_sorted.columns else [],
+                                            'eps': inc_sorted['eps'].tolist() if 'eps' in inc_sorted.columns else [],
+                                            'fcf': cf_sorted['freeCashFlow'].tolist() if not cf_sorted.empty and 'freeCashFlow' in cf_sorted.columns else [],
+                                            'operating_cf': cf_sorted['operatingCashFlow'].tolist() if not cf_sorted.empty and 'operatingCashFlow' in cf_sorted.columns else [],
+                                        }
+                                except Exception:
+                                    pass
+
+                        # Source 3: CSV screening data only (minimal)
+                        if fin_data is None:
+                            filt_df = st.session_state.workflow_data.get('filtered_df')
+                            if filt_df is not None and sym in filt_df['Symbol'].values:
+                                row = filt_df[filt_df['Symbol'] == sym].iloc[0]
+                                fin_data = {
+                                    'source': 'CSV (limited)',
+                                    'screening_metrics': {
+                                        k: row.get(k) for k in [
+                                            'Gross Margin %', 'Net Margin %', 'ROE %', 'ROA %',
+                                            'Debt-to-Equity', 'FCF Margin %', 'ROIC-WACC', 'ROTE-WACC',
+                                            'Market Cap ($M)', 'Earnings Power Value (EPV)', 'Current Price'
+                                        ] if row.get(k) is not None
+                                    }
+                                }
+
+                        # --- Call OpenAI for AI analysis ---
+                        try:
+                            from openai import OpenAI
+                            client = OpenAI(api_key=api_key)
+                            model = st.session_state.get('llm_model', 'gpt-4o-mini')
+
+                            # Get company name from screening data
+                            filt_df = st.session_state.workflow_data.get('filtered_df')
+                            company_name = ''
+                            if filt_df is not None and sym in filt_df['Symbol'].values:
+                                company_name = filt_df[filt_df['Symbol'] == sym].iloc[0].get('Company', '')
+
+                            data_summary = json.dumps(fin_data, default=str, indent=2) if fin_data else "No financial history available."
+
+                            prompt = f"""Analyze the financial history of {sym} ({company_name}) for anomalies and one-off distortions.
+
+FINANCIAL DATA (up to 10 years):
+{data_summary}
+
+ANALYSIS REQUIRED:
+1. **One-Off Income/Expenses**: Identify any years with unusual spikes or drops in revenue, net income, or operating income that appear to be one-off events (e.g., asset sales, write-downs, restructuring charges, legal settlements, pandemic impact).
+
+2. **Business Model Changes**: Detect any signs of fundamental shifts in the business (e.g., sudden margin profile changes, revenue composition shifts, pivot from product to services).
+
+3. **Earnings Quality Flags**: Flag years where EPS differs significantly from EPS without non-recurring items, or where operating cash flow diverges from net income.
+
+4. **Margin Distortions**: Identify unusual year-over-year changes in gross margin or net margin (>5 percentage points) that may indicate temporary factors.
+
+5. **Overall Assessment**: Rate the financial consistency as CLEAN (no significant distortions), MINOR (small one-offs that don't materially affect valuation), or MATERIAL (significant distortions that require adjustment to EPV).
+
+FORMAT YOUR RESPONSE AS:
+**Overall: [CLEAN/MINOR/MATERIAL]**
+
+**Findings:**
+- [Year]: [Description of anomaly and likely cause]
+- [Year]: [Description]
+
+**Impact on Valuation:**
+[1-2 sentences on whether EPV needs adjustment and why]"""
+
+                            response = client.chat.completions.create(
+                                model=model,
+                                messages=[
+                                    {"role": "system", "content": "You are a forensic financial analyst specializing in detecting one-off distortions and anomalies in company financials. Be specific about years and magnitudes. If data is limited, state what you can and cannot assess."},
+                                    {"role": "user", "content": prompt}
+                                ],
+                                max_tokens=800,
+                                temperature=0.3
+                            )
+
+                            ai_text = response.choices[0].message.content
+
+                            # Parse overall rating
+                            rating = 'UNKNOWN'
+                            for r in ['CLEAN', 'MINOR', 'MATERIAL']:
+                                if r in ai_text.upper()[:100]:
+                                    rating = r
+                                    break
+
+                            results[sym] = {
+                                'analysis': ai_text,
+                                'rating': rating,
+                                'data_source': fin_data.get('source', 'None') if fin_data else 'None',
+                                'has_data': True,
+                            }
+                        except Exception as e:
+                            results[sym] = {
+                                'analysis': f"Error during AI analysis: {str(e)}",
+                                'rating': 'ERROR',
+                                'data_source': fin_data.get('source', 'None') if fin_data else 'None',
+                                'has_data': False,
+                            }
+
+                    progress.empty()
+                    status_text.empty()
+                    st.session_state.agent_results['anomalies'] = results
+
+            # Display results
             if 'anomalies' in st.session_state.agent_results:
-                st.markdown("### Results")
+                st.markdown("### AI Analysis Results")
                 passed = []
 
-                # Get selected checks
-                checks = st.session_state.workflow_data.get('anomaly_checks', {
-                    'mscore': True, 'zscore': True, 'fscore': True,
-                    'sloan': True, 'cfmismatch': True, 'fcftrend': False,
-                    'inventory': False, 'receivables': False
-                })
-
                 for sym, d in st.session_state.agent_results['anomalies'].items():
-                    if d.get('has_data'):
-                        # Check each enabled metric
-                        check_results = []
-                        all_passed = True
+                    rating = d.get('rating', 'UNKNOWN')
+                    rating_map = {
+                        'CLEAN': ('✅', '#10b981', 'No significant distortions'),
+                        'MINOR': ('🟡', '#f59e0b', 'Minor one-offs detected'),
+                        'MATERIAL': ('🔴', '#ef4444', 'Material distortions found'),
+                        'ERROR': ('⚠️', '#94a3b8', 'Analysis error'),
+                        'UNKNOWN': ('❓', '#94a3b8', 'Could not determine'),
+                    }
+                    icon, color, desc = rating_map.get(rating, rating_map['UNKNOWN'])
 
-                        if checks.get('mscore', True):
-                            m_ok = (d.get('m') or -99) < -1.78
-                            m_val = f"{d.get('m'):.2f}" if d.get('m') else 'N/A'
-                            check_results.append(f"M: {m_val} {'✓' if m_ok else '✗'}")
-                            all_passed = all_passed and m_ok
+                    with st.expander(f"{icon} **{sym}** — {rating} ({desc}) | Data: {d.get('data_source', 'N/A')}", expanded=(rating == 'MATERIAL')):
+                        st.markdown(d.get('analysis', 'No analysis available.'))
 
-                        if checks.get('zscore', True):
-                            z_ok = (d.get('z') or 0) > 1.8
-                            z_val = f"{d.get('z'):.2f}" if d.get('z') else 'N/A'
-                            check_results.append(f"Z: {z_val} {'✓' if z_ok else '✗'}")
-                            all_passed = all_passed and z_ok
-
-                        if checks.get('fscore', True):
-                            f_ok = (d.get('f') or 0) >= 5
-                            f_val = f"{d.get('f')}" if d.get('f') else 'N/A'
-                            check_results.append(f"F: {f_val} {'✓' if f_ok else '✗'}")
-                            all_passed = all_passed and f_ok
-
-                        if checks.get('sloan', True):
-                            sloan = d.get('sloan', 0)
-                            sloan_ok = sloan is not None and abs(sloan) < 0.1
-                            sloan_val = f"{sloan*100:.1f}%" if sloan else 'N/A'
-                            check_results.append(f"Sloan: {sloan_val} {'✓' if sloan_ok else '✗'}")
-                            all_passed = all_passed and sloan_ok
-
-                        # Check for high severity anomalies
-                        high_ok = d.get('high', 99) == 0
-                        all_passed = all_passed and high_ok
-
-                        icon = "✅" if all_passed else "⚠️"
-                        st.markdown(f"{icon} **{sym}** | {' | '.join(check_results)}")
-
-                        if all_passed:
-                            passed.append(sym)
-                    else:
-                        st.markdown(f"ℹ️ **{sym}** | No data | {d.get('valuation', 'N/A')}")
+                    if rating in ('CLEAN', 'MINOR'):
                         passed.append(sym)
 
                 st.markdown("---")
                 final_candidates = list(st.session_state.agent_results['anomalies'].keys())
-                final_selection = st.multiselect("Select for final report:", final_candidates, passed if passed else final_candidates[:3])
+                final_selection = st.multiselect(
+                    "Select for final report:",
+                    final_candidates,
+                    passed if passed else final_candidates[:3]
+                )
                 st.session_state.workflow_data['final'] = final_selection
 
                 if final_selection:
-                    st.success(f"✅ {len(final_selection)} companies ready")
+                    st.success(f"✅ {len(final_selection)} companies ready for report")
                     col1, col2, col3 = st.columns([2, 1, 1])
                     with col2:
                         if st.button("← Back", use_container_width=True):
@@ -646,9 +1431,6 @@ def show_tabbed_workflow():
                 st.session_state.current_step = 2
                 st.rerun()
         else:
-            st.markdown(f"### 📝 Summary Report: Investment Analysis")
-            st.markdown(f"**{len(final)} companies passed all screening criteria**")
-
             # Build detailed report data
             report_data = []
             for sym in final:
@@ -659,77 +1441,31 @@ def show_tabbed_workflow():
                     'symbol': sym,
                     'company': stock.get('Company', 'N/A'),
                     'valuation': stock.get('Valuation', 'N/A'),
-                    'risk': anom.get('risk', 'N/A'),
-                    'm_score': anom.get('m'),
-                    'z_score': anom.get('z'),
-                    'f_score': anom.get('f'),
+                    'ai_rating': anom.get('rating', 'N/A'),
+                    'ai_analysis': anom.get('analysis', ''),
+                    'data_source': anom.get('data_source', 'N/A'),
                     'roe': stock.get('ROE %'),
+                    'roa': stock.get('ROA %'),
                     'gross_margin': stock.get('Gross Margin %'),
                     'net_margin': stock.get('Net Margin %'),
                     'debt_equity': stock.get('Debt-to-Equity'),
                     'fcf_margin': stock.get('FCF Margin %'),
+                    'roic_wacc': stock.get('ROIC-WACC'),
+                    'rote_wacc': stock.get('ROTE-WACC'),
+                    'rev_growth': stock.get('5-Year Revenue Growth Rate (Per Share)'),
+                    'eps_growth': stock.get('5-Year EPS without NRI Growth Rate'),
                     'epv': stock.get('Earnings Power Value (EPV)'),
                     'market_cap': stock.get('Market Cap ($M)'),
+                    'current_price': stock.get('Current Price'),
                 })
 
-            # Summary table
-            summary_df = pd.DataFrame([{
-                'Symbol': d['symbol'],
-                'Company': d['company'],
-                'Valuation': d['valuation'],
-                'Risk': d['risk'],
-                'M-Score': f"{d['m_score']:.2f}" if d['m_score'] else 'N/A',
-                'Z-Score': f"{d['z_score']:.2f}" if d['z_score'] else 'N/A',
-            } for d in report_data])
-            st.dataframe(summary_df, use_container_width=True)
-
-            st.markdown("---")
-            st.markdown("### Detailed Company Analysis")
-
-            for data in report_data:
-                with st.expander(f"📊 {data['symbol']} - {data['company']}", expanded=True):
-                    # Valuation section
-                    st.markdown("#### Valuation Assessment")
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        val_color = "🟢" if data['valuation'] == 'Undervalued' else "🟡" if data['valuation'] == 'Fair' else "🔴"
-                        st.markdown(f"**Status:** {val_color} {data['valuation']}")
-                    with col2:
-                        st.markdown(f"**EPV:** ${data['epv']}M" if data['epv'] else "**EPV:** N/A")
-                    with col3:
-                        st.markdown(f"**Market Cap:** ${data['market_cap']}M" if data['market_cap'] else "**Market Cap:** N/A")
-
-                    # Risk section
-                    st.markdown("#### Risk Analysis")
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        m_status = "✅ Pass" if data['m_score'] and data['m_score'] < -1.78 else "⚠️ Flag"
-                        m_score_str = f"{data['m_score']:.2f}" if data['m_score'] is not None else "N/A"
-                        st.markdown(f"**M-Score:** {m_score_str} ({m_status})")
-                    with col2:
-                        z_status = "✅ Safe" if data['z_score'] and data['z_score'] > 1.8 else "⚠️ Distress"
-                        z_score_str = f"{data['z_score']:.2f}" if data['z_score'] is not None else "N/A"
-                        st.markdown(f"**Z-Score:** {z_score_str} ({z_status})")
-                    with col3:
-                        f_status = "✅ Strong" if data['f_score'] and data['f_score'] >= 5 else "⚠️ Weak"
-                        f_score_str = str(data['f_score']) if data['f_score'] is not None else "N/A"
-                        st.markdown(f"**F-Score:** {f_score_str} ({f_status})")
-
-                    # Fundamentals section
-                    st.markdown("#### Key Fundamentals")
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("ROE", f"{data['roe']}%" if data['roe'] else "N/A")
-                    with col2:
-                        st.metric("Gross Margin", f"{data['gross_margin']}%" if data['gross_margin'] else "N/A")
-                    with col3:
-                        st.metric("Net Margin", f"{data['net_margin']}%" if data['net_margin'] else "N/A")
-                    with col4:
-                        st.metric("Debt/Equity", f"{data['debt_equity']}" if data['debt_equity'] else "N/A")
+            # Render professional summary report dashboard
+            from summary_report import render_summary_report
+            render_summary_report(report_data)
 
             st.markdown("---")
 
-            # Generate PDF Report
+            # Generate DOCX Report + Navigation
             col1, col2 = st.columns([2, 2])
             with col1:
                 if st.button("← Back to Anomaly Analysis"):

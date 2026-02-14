@@ -46,6 +46,18 @@ Thumbs.db
 .env.local
 .env.*.local
 
+# Agent/IDE configs
+.agent/
+.agents/
+.claude/
+.cline/
+.codex/
+.cursor/
+.gemini/
+.opencode/
+.trae/
+.windsurf/
+
 # Project specific
 *.log
 output/
