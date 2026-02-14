@@ -4,6 +4,8 @@ An AI-powered Python tool for value investors with stock screening, automated va
 
 **[Try the Live Demo](https://value-investment-academy.streamlit.app)**
 
+![Value Investment Academy](screenshot.jpeg)
+
 ## Features
 
 ### 1. Stock Screener (10 Criteria)
