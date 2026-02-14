@@ -91,6 +91,19 @@ cp .env.example .env
 streamlit run app.py
 ```
 
+### Using Docker
+
+```bash
+docker pull tertiaryinfotech/value-investment:latest
+
+docker run -p 8501:8501 \
+  -e OPENAI_API_KEY=your-key \
+  -e FMP_API_KEY=your-key \
+  tertiaryinfotech/value-investment:latest
+```
+
+Then open http://localhost:8501 in your browser.
+
 ### Command Line Interface
 
 ```bash
