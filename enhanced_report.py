@@ -16,33 +16,164 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 
-def get_openai_client(api_key: str):
-    """Get OpenAI client with provided API key."""
-    from openai import OpenAI
-    return OpenAI(api_key=api_key)
+from llm import claude_complete
+
+
+# Haiku keeps per-company cost low — the report makes 4-7 LLM calls per company.
+REPORT_MODEL = "claude-haiku-4-5-20251001"
+
+ANALYST_SYSTEM_PROMPT = """You are a senior equity research analyst at a top investment bank.
+Write professional, insightful investment analysis. Be specific, data-driven,
+and provide actionable insights. Use clear, concise financial language.
+Do NOT use markdown formatting - write plain text suitable for a Word document."""
+
+
+def get_anthropic_client(api_key: str = None):
+    """No-op shim kept for backward compatibility with the public function signature.
+
+    Auth is now handled by Claude Code CLI subscription login, not an API key.
+    """
+    return None
 
 
 def generate_ai_analysis(client, prompt: str, max_tokens: int = 1500) -> str:
-    """Generate AI analysis using OpenAI."""
+    """Generate AI analysis via claude-agent-sdk (uses Claude Code CLI auth).
+
+    The `client` and `max_tokens` args are kept for signature stability;
+    they are not used by claude-agent-sdk's query() under the hood.
+    """
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """You are a senior equity research analyst at a top investment bank.
-                    Write professional, insightful investment analysis. Be specific, data-driven,
-                    and provide actionable insights. Use clear, concise financial language.
-                    Do NOT use markdown formatting - write plain text suitable for a Word document."""
-                },
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=max_tokens,
-            temperature=0.7
-        )
-        return response.choices[0].message.content.strip()
+        return claude_complete(user=prompt, system=ANALYST_SYSTEM_PROMPT, model=REPORT_MODEL)
     except Exception as e:
         return f"[Analysis generation failed: {str(e)}]"
+
+
+def generate_company_background(client, company_data: Dict) -> str:
+    """Generate a 2-paragraph factual company background for the Profile section."""
+    symbol = company_data.get('symbol', 'Unknown')
+    company = company_data.get('company', 'Unknown Company')
+    sector = company_data.get('sector', 'N/A')
+    industry = company_data.get('industry', 'N/A')
+
+    prompt = f"""Write a clean, professional 2-paragraph company background for inclusion in a research report.
+
+Company: {company} (ticker: {symbol})
+Sector: {sector}
+Industry: {industry}
+
+Output rules — strict:
+- Output ONLY the two paragraphs of background prose. No preamble, no caveats about
+  your training data, no "I have limited knowledge" disclaimers, no source URLs,
+  no "Paragraph 1:" or "Paragraph 2:" labels, no markdown.
+- Paragraph 1: What the company does (core products/services, customer base).
+- Paragraph 2: Where it operates and its competitive position in its industry.
+- 3-4 sentences per paragraph. Plain text suitable for a Word document.
+- If you do not know the specific company well, write a generic, factual paragraph
+  describing what businesses in this Sector/Industry typically do, framed as
+  "{company} operates in the {industry} industry, where companies typically..." —
+  do NOT meta-comment about your knowledge limits.
+
+Begin the response with the first paragraph directly."""
+
+    text = generate_ai_analysis(client, prompt, max_tokens=500)
+    return _clean_background_text(text)
+
+
+def _clean_background_text(text: str) -> str:
+    """Strip any meta-commentary or labels the AI may emit despite instructions."""
+    if not text:
+        return text
+
+    import re
+    # Drop common preamble patterns the model sometimes opens with
+    preamble_patterns = [
+        r"^I (?:appreciate|understand|acknowledge|have|don't|cannot)[^.]*\.\s*",
+        r"^Based on what I can reliably[^.]*[.:]\s*",
+        r"^Let me (?:search|provide|write)[^.]*[.:]\s*",
+        r"^Here (?:is|are)[^:]*:\s*",
+        r"^Note:[^.]*\.\s*",
+    ]
+    cleaned = text.strip()
+    for _ in range(3):  # repeat to catch stacked preambles
+        for pat in preamble_patterns:
+            cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
+
+    # Drop literal paragraph labels like "PARAGRAPH 1:" / "Paragraph 1." / "**Paragraph 1**"
+    cleaned = re.sub(r"\*{0,2}PARAGRAPH\s*\d+\s*\*{0,2}\s*[:.\-]\s*", "",
+                     cleaned, flags=re.IGNORECASE)
+
+    # Drop trailing CAVEAT/Sources/Disclaimer blocks
+    for stop_word in ["CAVEAT:", "Sources:", "Source:", "Disclaimer:", "Note that",
+                      "Given the time gap"]:
+        idx = cleaned.find(stop_word)
+        if idx > 0:
+            cleaned = cleaned[:idx].rstrip()
+
+    # Collapse 3+ blank lines into a single blank line
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+    return cleaned
+
+
+def compute_valuation_range(company_data: Dict) -> Dict[str, Any]:
+    """
+    Build the in-house Valuation Range using the client's two-stage DCF
+    formula. Low IV and High IV are pre-computed in the screener; here we
+    compose them into a 3-point range with a fair-value midpoint and verdict.
+
+    Returns dict with keys: lower (Low IV), fair (midpoint), upper (High IV),
+    current_price, currency, upside_pct, verdict.
+    """
+    low_iv = company_data.get('low_iv')
+    high_iv = company_data.get('high_iv')
+    current_price = company_data.get('current_price')
+    currency = company_data.get('currency', 'USD')
+
+    out = {
+        'lower': None,
+        'fair': None,
+        'upper': None,
+        'current_price': current_price,
+        'currency': currency,
+        'upside_pct': None,
+        'verdict': 'N/A',
+    }
+
+    def _num(v):
+        try:
+            f = float(v) if v is not None else None
+            return f if f is None or f == f else None
+        except (TypeError, ValueError):
+            return None
+
+    low = _num(low_iv)
+    high = _num(high_iv)
+    cp = _num(current_price)
+
+    # Fall back to EPV-based range only if the in-house formula couldn't run
+    if low is None or high is None or low <= 0 or high <= 0:
+        epv_val = _num(company_data.get('epv'))
+        if epv_val is None or epv_val <= 0:
+            out['verdict'] = 'N/A (Negative EPS — DCF math undefined)'
+            return out
+        out['lower'] = round(epv_val * 0.7, 2)
+        out['fair'] = round(epv_val, 2)
+        out['upper'] = round(epv_val * 1.3, 2)
+    else:
+        out['lower'] = round(low, 2)
+        out['fair'] = round((low + high) / 2.0, 2)
+        out['upper'] = round(high, 2)
+
+    if cp is not None and cp > 0 and out['fair'] is not None:
+        out['upside_pct'] = round(((out['fair'] - cp) / cp) * 100, 1)
+        if cp < out['lower']:
+            out['verdict'] = 'Undervalued'
+        elif cp <= out['upper']:
+            out['verdict'] = 'Fair Value'
+        else:
+            out['verdict'] = 'Overvalued'
+
+    return out
 
 
 def generate_executive_summary(client, report_data: List[Dict], criteria: Dict) -> str:
@@ -146,25 +277,6 @@ Write as a senior analyst providing insights to portfolio managers. Be specific 
 
     business_analysis = generate_ai_analysis(client, business_prompt, max_tokens=800)
 
-    # Valuation Analysis
-    valuation_prompt = f"""Provide a valuation analysis (2 paragraphs) for {symbol}.
-
-VALUATION METRICS:
-- Earnings Power Value (EPV): ${metrics['epv']}M
-- Market Capitalization: ${metrics['market_cap']}M
-- EPV/Market Cap Ratio: {f'{epv_mc_ratio:.2f}' if epv_mc_ratio else 'N/A'}
-- Implied Margin of Safety: {f'{margin_of_safety:+.1f}%' if margin_of_safety else 'N/A'}
-- Current Valuation Status: {metrics['valuation']}
-
-Analyze:
-1. Whether the current valuation is justified by fundamentals
-2. Key assumptions and risks to the valuation thesis
-3. Potential catalysts that could close any valuation gap
-
-Be specific about upside/downside scenarios."""
-
-    valuation_analysis = generate_ai_analysis(client, valuation_prompt, max_tokens=600)
-
     # Risk Assessment
     ai_analysis_excerpt = metrics.get('ai_analysis', '')[:500] if metrics.get('ai_analysis') else 'No AI anomaly analysis available.'
 
@@ -207,9 +319,8 @@ Be decisive and specific about why an investor should or should not own this sto
 
     return {
         'business_analysis': business_analysis,
-        'valuation_analysis': valuation_analysis,
         'risk_analysis': risk_analysis,
-        'investment_thesis': investment_thesis
+        'investment_thesis': investment_thesis,
     }
 
 
@@ -361,11 +472,16 @@ def add_styled_table(doc: Document, headers: List[str], rows: List[List[str]],
             for run in paragraph.runs:
                 run.font.color.rgb = RGBColor(255, 255, 255)
 
-    # Add data rows
-    for row_data in rows:
+    # Add data rows with zebra striping for readability
+    zebra_fill = 'F4F6F9'  # very light blue-gray
+    for r_idx, row_data in enumerate(rows):
         row = table.add_row().cells
         for i, value in enumerate(row_data):
             row[i].text = str(value)
+            if r_idx % 2 == 1:  # alternate rows
+                shading = OxmlElement('w:shd')
+                shading.set(qn('w:fill'), zebra_fill)
+                row[i]._tc.get_or_add_tcPr().append(shading)
 
     return table
 
@@ -385,11 +501,239 @@ def fmt_money(val):
     return f"${val}M" if val is not None else "N/A"
 
 
+def _fetch_ten_year_via_claude(symbol: str, company: str) -> Optional[Dict[str, list]]:
+    """
+    Use Claude (knowledge-based, fast — no WebSearch) to provide best-effort
+    10-year annual financials. Returns a dict for the chart engine, or None
+    if Claude couldn't produce usable data.
+
+    Trade-off: ~8 sec per company (fast for demo) vs WebSearch (~2-3 min per
+    company but with verifiable sources). Caption flags this clearly.
+    """
+    import json
+    import re
+    from llm import claude_complete
+
+    system = (
+        "You are a financial-data assistant. Output STRICT JSON only — no preamble, "
+        "no commentary, no markdown code fences, no caveats. If you genuinely do not "
+        "have data for a company, return {\"years\": []}."
+    )
+    user = f"""Provide your best estimate of {company} ({symbol})'s annual financial data for the past 10 fiscal years based on your training knowledge.
+
+For each year, give:
+- Total Revenue (in USD millions, converted from local currency if needed)
+- Net Income (in USD millions)
+- Free Cash Flow (in USD millions)
+
+Return ONLY this exact JSON shape, no other text:
+
+{{
+  "symbol": "{symbol}",
+  "years": [
+    {{"year": "2015", "revenue_m": 25.0, "net_income_m": 2.0, "fcf_m": 3.5}},
+    {{"year": "2016", "revenue_m": 35.0, "net_income_m": 3.0, "fcf_m": 4.0}}
+  ]
+}}
+
+Order years oldest first. Use null for any field you cannot estimate. If you do not know this company at all, return {{"symbol": "{symbol}", "years": []}}.
+Output ONLY the JSON."""
+
+    try:
+        raw = claude_complete(user=user, system=system)
+    except Exception:
+        return None
+
+    if not raw:
+        return None
+
+    # Strip code fences if Claude wrapped the JSON despite our instructions
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"```\s*$", "", cleaned).strip()
+
+    # Find first { and last } — defensive against any leading/trailing prose
+    first = cleaned.find("{")
+    last = cleaned.rfind("}")
+    if first == -1 or last == -1 or last <= first:
+        return None
+    cleaned = cleaned[first:last + 1]
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None
+
+    years = data.get("years") or []
+    if not years:
+        return None
+
+    rev_pts, ni_pts, fcf_pts = [], [], []
+    for entry in years:
+        y = str(entry.get("year", "")).strip()
+        if not y:
+            continue
+        rev = entry.get("revenue_m")
+        ni = entry.get("net_income_m")
+        fcf = entry.get("fcf_m")
+        if rev is not None:
+            rev_pts.append((y, float(rev)))
+        if ni is not None:
+            ni_pts.append((y, float(ni)))
+        if fcf is not None:
+            fcf_pts.append((y, float(fcf)))
+
+    series = {}
+    if rev_pts:
+        series["Revenue ($M)"] = rev_pts
+    if ni_pts:
+        series["Net Income ($M)"] = ni_pts
+    if fcf_pts:
+        series["Free Cash Flow ($M)"] = fcf_pts
+    return series or None
+
+
+def _synthesize_history_from_csv_row(company_data: Dict) -> Optional[Dict[str, list]]:
+    """
+    Build an approximate 5-year history from the screener CSV metrics, for
+    cases where Claude has no training data on the company. Computes:
+      Net Income (current)  = Market Cap / PE Ratio
+      Revenue (current)     = Net Income / Net Margin
+      FCF (current)         = Revenue × FCF Margin
+    Then back-extrapolates using the 5-year growth rates already in the CSV.
+
+    Returns None if the inputs are insufficient (e.g., loss-making company
+    with no PE ratio).
+    """
+    from datetime import datetime
+
+    def _to_float(v):
+        try:
+            f = float(v)
+            return f if f == f else None  # filter NaN
+        except (TypeError, ValueError):
+            return None
+
+    market_cap = _to_float(company_data.get('market_cap'))
+    pe_ratio = _to_float(company_data.get('pe_ratio'))
+    net_margin = _to_float(company_data.get('net_margin'))
+    fcf_margin = _to_float(company_data.get('fcf_margin'))
+    rev_growth = _to_float(company_data.get('rev_growth'))
+    eps_growth = _to_float(company_data.get('eps_growth'))
+    fcf_growth = _to_float(company_data.get('fcf_growth'))
+
+    if not market_cap or market_cap <= 0:
+        return None
+    if not pe_ratio or pe_ratio <= 0:
+        return None
+    if not net_margin or net_margin <= 0:
+        # Negative-margin / loss-making company — math doesn't apply
+        return None
+
+    current_ni = market_cap / pe_ratio
+    current_revenue = current_ni / (net_margin / 100.0)
+    current_fcf = current_revenue * (fcf_margin / 100.0) if fcf_margin else None
+
+    # Default growth = 0% if missing
+    rev_factor = 1 + ((rev_growth or 0) / 100.0)
+    eps_factor = 1 + ((eps_growth or 0) / 100.0)
+    fcf_factor = 1 + ((fcf_growth or rev_growth or 0) / 100.0)
+
+    # 10-year window: last completed fiscal year + 9 years prior
+    current_year = datetime.now().year - 1
+    years = list(range(current_year - 9, current_year + 1))
+
+    revenue_series, ni_series, fcf_series = [], [], []
+    for i, year in enumerate(years):
+        years_back = (len(years) - 1) - i
+        if rev_factor > 0:
+            rev = current_revenue / (rev_factor ** years_back)
+            revenue_series.append((str(year), round(rev, 1)))
+        if eps_factor > 0:
+            ni = current_ni / (eps_factor ** years_back)
+            ni_series.append((str(year), round(ni, 1)))
+        if current_fcf is not None and fcf_factor > 0:
+            fcf = current_fcf / (fcf_factor ** years_back)
+            fcf_series.append((str(year), round(fcf, 1)))
+
+    series = {}
+    if revenue_series:
+        series["Revenue ($M)"] = revenue_series
+    if ni_series:
+        series["Net Income ($M)"] = ni_series
+    if fcf_series:
+        series["Free Cash Flow ($M)"] = fcf_series
+    return series or None
+
+
+def _embed_ten_year_chart(doc, symbol: str, company: str = "", company_data: Optional[Dict] = None) -> bool:
+    """
+    Embed a 5-10 year line chart in the DOCX.
+
+    Strategy (waterfall):
+      1. Try Claude knowledge-based fetch (real numbers if Claude knows the company).
+      2. Fall back to CSV-based synthesis (model-extrapolated from current
+         metrics + 5-year growth rates — works for any ticker in the CSV).
+      3. If both fail, return False so caller can print a fallback message.
+    """
+    try:
+        from chart_engine import make_ten_year_line_chart_png
+
+        # Step 1: Claude
+        series = _fetch_ten_year_via_claude(symbol, company or symbol)
+        source_label = (
+            f"Source: Claude AI estimates from training data — best-effort figures for {symbol}. "
+            "Verify against 10-K / primary filings before any investment decision."
+        )
+
+        # Step 2: CSV synthesis fallback
+        if not series and company_data:
+            series = _synthesize_history_from_csv_row(company_data)
+            if series:
+                source_label = (
+                    f"Source: Model-derived 10-year extrapolation from current metrics + 5-year growth "
+                    f"rates (Market Cap, PE, Margins). Years 6-10 assume the same growth pattern. "
+                    f"Indicative only — cross-check against 10-K filings before any investment decision."
+                )
+
+        if not series:
+            return False
+
+        png_buf = make_ten_year_line_chart_png(
+            title=f"{symbol} — 10-Year Revenue, Net Income, and Free Cash Flow",
+            series_by_label=series,
+            y_format="money",
+        )
+        if png_buf is None:
+            return False
+
+        pic_para = doc.add_paragraph()
+        pic_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        pic_run = pic_para.add_run()
+        pic_run.add_picture(png_buf, width=Inches(6.0))
+
+        caption = doc.add_paragraph()
+        caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cap_run = caption.add_run(source_label)
+        cap_run.italic = True
+        cap_run.font.size = Pt(9)
+        cap_run.font.color.rgb = RGBColor(120, 120, 120)
+        return True
+    except Exception as e:
+        ph = doc.add_paragraph()
+        ph_run = ph.add_run(f"[10-year chart generation failed for {symbol}: {e}]")
+        ph_run.italic = True
+        ph_run.font.color.rgb = RGBColor(180, 80, 80)
+        return True
+
+
 def generate_professional_report(
     report_data: List[Dict],
     criteria: Dict,
     api_key: str,
-    progress_callback=None
+    progress_callback=None,
+    universe_df=None,
 ) -> BytesIO:
     """
     Generate a professional AI-enhanced investment report.
@@ -397,14 +741,14 @@ def generate_professional_report(
     Args:
         report_data: List of company data dictionaries
         criteria: Screening criteria used
-        api_key: OpenAI API key
+        api_key: Ignored. Auth via Claude Code CLI login. Kept for signature stability.
         progress_callback: Optional callback function for progress updates
 
     Returns:
         BytesIO buffer containing the DOCX file
     """
 
-    client = get_openai_client(api_key)
+    client = None  # No client object needed; claude-agent-sdk handles auth via CLI
     doc = Document()
 
     # Apply professional styling
@@ -419,27 +763,56 @@ def generate_professional_report(
     # ========================================
     update_progress("Creating cover page...")
 
-    doc.add_paragraph("")
-    doc.add_paragraph("")
-    doc.add_paragraph("")
+    # Vertical spacing to push content down toward visual center
+    for _ in range(6):
+        doc.add_paragraph("")
 
-    title = doc.add_heading('VALUE INVESTMENT ACADEMY', 0)
+    title = doc.add_heading('VIA FINANCIAL ANALYSIS PLATFORM', 0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     subtitle = doc.add_heading('Professional Investment Research Report', level=1)
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
+    # Tagline
+    tagline = doc.add_paragraph()
+    tagline.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    tag_run = tagline.add_run("EPV Valuation  ·  Forensic Risk Assessment  ·  AI-Enhanced Analysis")
+    tag_run.italic = True
+    tag_run.font.size = Pt(11)
+    tag_run.font.color.rgb = RGBColor(80, 80, 80)
+
+    doc.add_paragraph("")
     doc.add_paragraph("")
     doc.add_paragraph("")
 
-    info = doc.add_paragraph()
-    info.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = info.add_run(f"Report Date: {datetime.now().strftime('%B %d, %Y')}\n")
-    run.bold = True
-    run.font.size = Pt(12)
-    info.add_run(f"\nCompanies Analyzed: {len(report_data)}\n")
-    info.add_run("Analysis Framework: EPV Valuation + Forensic Risk Assessment\n")
-    info.add_run("\nPowered by AI-Enhanced Analysis")
+    # Metadata block
+    meta = doc.add_paragraph()
+    meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    label_color = RGBColor(80, 80, 80)
+
+    def _meta_line(label: str, value: str, bold_value: bool = False):
+        run_lab = meta.add_run(f"{label}: ")
+        run_lab.font.size = Pt(11)
+        run_lab.font.color.rgb = label_color
+        run_val = meta.add_run(f"{value}\n")
+        run_val.font.size = Pt(11)
+        run_val.bold = bold_value
+
+    _meta_line("Report Date", datetime.now().strftime('%B %d, %Y'), bold_value=True)
+    _meta_line("Generated", datetime.now().strftime('%Y-%m-%d %H:%M'))
+    _meta_line("Companies Analyzed", str(len(report_data)))
+    _meta_line("Analysis Framework", "EPV Valuation + Forensic Risk Assessment")
+
+    doc.add_paragraph("")
+    doc.add_paragraph("")
+
+    # Confidentiality footer
+    confidential = doc.add_paragraph()
+    confidential.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    cf_run = confidential.add_run("CONFIDENTIAL — For internal review only")
+    cf_run.font.size = Pt(9)
+    cf_run.font.color.rgb = RGBColor(120, 120, 120)
+    cf_run.bold = True
 
     doc.add_page_break()
 
@@ -450,11 +823,13 @@ def generate_professional_report(
 
     toc_items = [
         ("1.", "Executive Summary", "AI-generated investment thesis and key findings"),
-        ("2.", "Screening Results", "Quantitative screening results and valuation overview"),
-        ("3.", "Detailed Company Analysis", "Deep-dive analysis of each company"),
-        ("4.", "Management Quality Assessment", "CEO commitment and governance indicators"),
+        ("2.", "Screening Results Overview", "Quantitative screening results and valuation distribution"),
+        ("3.", "Detailed Company Analysis",
+            "Per-company sections: A. Profile  ·  B. Valuation Range  ·  "
+            "C. Key Metrics  ·  D. 10-Year Trends  ·  E. Competitor Comparison  ·  F. Analyst Assessment"),
+        ("4.", "Management Quality Assessment", "Governance indicators and capital allocation discipline"),
         ("5.", "Portfolio Recommendations", "Position sizing and allocation strategy"),
-        ("6.", "Risk Disclosure", "Methodology notes and limitations")
+        ("6.", "Risk Disclosure & Methodology", "Methodology notes, limitations, and disclaimer"),
     ]
 
     for num, title, desc in toc_items:
@@ -565,14 +940,14 @@ def generate_professional_report(
     doc.add_page_break()
 
     # ========================================
-    # 3. DETAILED COMPANY ANALYSIS (AI-Enhanced)
+    # 3. DETAILED COMPANY ANALYSIS (Standardized Template)
     # ========================================
     doc.add_heading('3. Detailed Company Analysis', level=1)
 
     doc.add_paragraph(
-        "The following section provides AI-enhanced deep-dive analysis for each company "
-        "in the screened universe. Analysis covers business quality, valuation, risk assessment, "
-        "and investment thesis."
+        "Each company in this section follows a standardized research template: "
+        "Company Profile, Valuation Range, Key Financial Metrics, 10-Year Financial "
+        "Trends, Competitor Comparison, and Analyst Assessment."
     )
 
     for idx, company_data in enumerate(report_data):
@@ -581,87 +956,225 @@ def generate_professional_report(
 
         update_progress(f"Analyzing {symbol} ({idx + 1}/{len(report_data)})...")
 
-        doc.add_heading(f"3.{idx + 1} {symbol} - {company}", level=2)
+        # Section header
+        doc.add_heading(f"3.{idx + 1} {symbol} — {company}", level=2)
 
-        # Company snapshot table
-        epv_mc_ratio = None
-        if company_data.get('epv') and company_data.get('market_cap'):
-            try:
-                epv_mc_ratio = float(company_data['epv']) / float(company_data['market_cap'])
-            except:
-                pass
+        # Generate AI analysis for this company (background + risk + thesis)
+        background = generate_company_background(client, company_data)
+        ai_analysis = generate_company_deep_dive(client, company_data)
+        valuation = compute_valuation_range(company_data)
+        currency = valuation.get('currency') or company_data.get('currency', 'USD')
+
+        # ----------------------------------------------------------------
+        # A. COMPANY PROFILE
+        # ----------------------------------------------------------------
+        doc.add_heading('A. Company Profile', level=3)
 
         add_styled_table(doc,
-            ['EPV', 'Market Cap', 'EPV/MC Ratio', 'Valuation', 'AI Rating'],
-            [[
-                fmt_money(company_data.get('epv')),
-                fmt_money(company_data.get('market_cap')),
-                f"{epv_mc_ratio:.2f}" if epv_mc_ratio else 'N/A',
-                company_data.get('valuation', 'N/A'),
-                company_data.get('ai_rating', 'N/A')
-            ]]
+            ['Field', 'Value'],
+            [
+                ['Company Name', company],
+                ['Ticker Symbol', symbol],
+                ['Exchange', str(company_data.get('exchange', 'N/A'))],
+                ['Sector', str(company_data.get('sector', 'N/A'))],
+                ['Industry', str(company_data.get('industry', 'N/A'))],
+                ['Sub-Industry', str(company_data.get('subindustry', 'N/A'))],
+                ['Reporting Currency', currency],
+            ]
         )
+        doc.add_paragraph("")
+
+        # Background paragraphs
+        for para in background.split('\n\n'):
+            if para.strip():
+                doc.add_paragraph(para.strip())
 
         doc.add_paragraph("")
 
-        # Generate AI analysis for this company
-        ai_analysis = generate_company_deep_dive(client, company_data)
+        # ----------------------------------------------------------------
+        # B. VALUATION RANGE
+        # ----------------------------------------------------------------
+        doc.add_heading('B. Valuation Range', level=3)
 
-        # Business Analysis Section
-        doc.add_heading('Business Quality Analysis', level=3)
+        cp_str = f"{currency} {valuation['current_price']:.2f}" if valuation.get('current_price') is not None else 'N/A'
+        upside_str = f"{valuation['upside_pct']:+.1f}% vs current price" if valuation.get('upside_pct') is not None else 'N/A'
+
+        add_styled_table(doc,
+            ['Scenario', 'Price per Share', 'Description'],
+            [
+                ['Low Intrinsic Value (Conservative)',
+                 f"{currency} {valuation['lower']:.2f}" if valuation.get('lower') is not None else 'N/A',
+                 'In-house DCF — historical EPS growth dampened by 8× (capped at 3%)'],
+                ['Fair Value (midpoint)',
+                 f"{currency} {valuation['fair']:.2f}" if valuation.get('fair') is not None else 'N/A',
+                 'Midpoint of the Low/High IV range'],
+                ['High Intrinsic Value (Aggressive)',
+                 f"{currency} {valuation['upper']:.2f}" if valuation.get('upper') is not None else 'N/A',
+                 'In-house DCF — historical EPS growth dampened by 2× (capped at 12%)'],
+                ['Current Market Price', cp_str, 'Market quote at time of analysis'],
+                ['Implied Upside to Fair Value', upside_str, 'Positive = trading below midpoint'],
+                ['Verdict', valuation.get('verdict', 'N/A'),
+                 'Undervalued < Low IV; Fair Value within range; Overvalued > High IV'],
+            ]
+        )
+        doc.add_paragraph("")
+        doc.add_paragraph(
+            "Valuation derived from the client's in-house two-stage DCF formula: "
+            "EPS growth dampened to a conservative scenario (Low IV) and an aggressive "
+            "scenario (High IV), each discounted at 10% with a 2% terminal growth rate "
+            "and a 30% margin of safety. Inputs sourced from the screener CSV "
+            "(Current Price, PE Ratio, 5-Year EPS Growth)."
+        )
+        doc.add_paragraph("")
+
+        # ----------------------------------------------------------------
+        # C. KEY FINANCIAL METRICS
+        # ----------------------------------------------------------------
+        doc.add_heading('C. Key Financial Metrics', level=3)
+        add_styled_table(doc,
+            ['Metric', 'Value', 'Notes'],
+            [
+                ['Return on Equity (ROE)', fmt_pct(company_data.get('roe')), 'Profit per $1 of shareholder equity'],
+                ['Return on Assets (ROA)', fmt_pct(company_data.get('roa')), 'Profit per $1 of total assets'],
+                ['Gross Margin', fmt_pct(company_data.get('gross_margin')), 'Pricing power signal'],
+                ['Net Margin', fmt_pct(company_data.get('net_margin')), 'Bottom-line profitability'],
+                ['FCF Margin', fmt_pct(company_data.get('fcf_margin')), 'Cash generation per $1 of revenue'],
+                ['Debt-to-Equity', str(company_data.get('debt_equity', 'N/A')), 'Balance sheet leverage'],
+                ['ROIC − WACC', fmt_pct(company_data.get('roic_wacc')), 'Value creation spread'],
+                ['ROTE − WACC', fmt_pct(company_data.get('rote_wacc')), 'Value creation on tangible equity'],
+                ['5-Year Revenue Growth', fmt_pct(company_data.get('rev_growth')), 'Topline momentum'],
+                ['5-Year EPS Growth', fmt_pct(company_data.get('eps_growth')), 'Earnings momentum per share'],
+                ['Market Capitalization', fmt_money(company_data.get('market_cap')), 'Total equity value'],
+            ]
+        )
+        doc.add_paragraph("")
+
+        # ----------------------------------------------------------------
+        # D. 10-YEAR FINANCIAL TRENDS (line charts via FMP API)
+        # ----------------------------------------------------------------
+        doc.add_heading('D. 10-Year Financial Trends', level=3)
+
+        history_added = _embed_ten_year_chart(doc, symbol, company, company_data=company_data)
+        if not history_added:
+            ph = doc.add_paragraph()
+            ph_run = ph.add_run(
+                f"[Insufficient data to construct a historical chart for {symbol}: "
+                "either the company is loss-making (no positive PE ratio), or the "
+                "screener CSV is missing key fields (Market Cap, Net Margin, Growth Rates).]"
+            )
+            ph_run.italic = True
+            ph_run.font.color.rgb = RGBColor(120, 120, 120)
+        doc.add_paragraph("")
+
+        # ----------------------------------------------------------------
+        # E. COMPETITOR COMPARISON (bar charts)
+        # ----------------------------------------------------------------
+        doc.add_heading('E. Competitor Comparison', level=3)
+
+        peer_charts_added = False
+        if universe_df is not None and not universe_df.empty:
+            try:
+                from peer_finder import find_peers, build_peer_metrics_frame
+                from chart_engine import make_competitor_bar_chart_png
+
+                target_rows = universe_df[universe_df['Symbol'] == symbol]
+                if not target_rows.empty:
+                    target_row_full = target_rows.iloc[0]
+                    peers = find_peers(symbol, universe_df, limit=5)
+
+                    if not peers.empty:
+                        intro = doc.add_paragraph()
+                        intro.add_run(
+                            f"{symbol} is compared below against {len(peers)} peer{'s' if len(peers) != 1 else ''} "
+                            f"({', '.join(peers['Symbol'].tolist())}) sharing the same Sector and Industry, "
+                            "ranked by market capitalization."
+                        )
+
+                        metrics_df = build_peer_metrics_frame(target_row_full, peers)
+                        peer_chart_specs = [
+                            ('ROE %', 'Return on Equity', True),
+                            ('Net Margin %', 'Net Margin', True),
+                            ('FCF Margin %', 'Free Cash Flow Margin', True),
+                            ('5-Year Revenue Growth Rate (Per Share)', '5-Year Revenue Growth', True),
+                            ('Debt-to-Equity', 'Debt-to-Equity Ratio', False),
+                        ]
+
+                        for col_name, label, is_pct in peer_chart_specs:
+                            png_buf = make_competitor_bar_chart_png(
+                                metric_label=label,
+                                metrics_df=metrics_df,
+                                metric_column=col_name,
+                                target_symbol=symbol,
+                                is_percentage=is_pct,
+                            )
+                            if png_buf is not None:
+                                pic_para = doc.add_paragraph()
+                                pic_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                pic_run = pic_para.add_run()
+                                pic_run.add_picture(png_buf, width=Inches(6.0))
+                                peer_charts_added = True
+                    else:
+                        ph = doc.add_paragraph()
+                        ph_run = ph.add_run(
+                            f"[No peers found for {symbol} in the screening universe — "
+                            "widen the screen criteria to include more companies in the same Sector + Industry.]"
+                        )
+                        ph_run.italic = True
+                        ph_run.font.color.rgb = RGBColor(120, 120, 120)
+                        peer_charts_added = True  # explanatory text counts
+            except Exception as e:
+                ph = doc.add_paragraph()
+                ph_run = ph.add_run(f"[Competitor chart generation failed: {e}]")
+                ph_run.italic = True
+                ph_run.font.color.rgb = RGBColor(180, 80, 80)
+                peer_charts_added = True
+
+        if not peer_charts_added:
+            ph = doc.add_paragraph()
+            ph_run = ph.add_run(
+                f"[Bar charts comparing {symbol} against peers in the {company_data.get('industry', 'same')} "
+                "industry require the screening universe — re-run Step 1 before generating the report.]"
+            )
+            ph_run.italic = True
+            ph_run.font.color.rgb = RGBColor(120, 120, 120)
+
+        doc.add_paragraph("")
+
+        # ----------------------------------------------------------------
+        # F. ANALYST ASSESSMENT
+        # ----------------------------------------------------------------
+        doc.add_heading('F. Analyst Assessment', level=3)
+
+        # F.1 Business Quality
+        doc.add_heading('Business Quality', level=4)
         for para in ai_analysis['business_analysis'].split('\n\n'):
             if para.strip():
                 doc.add_paragraph(para.strip())
 
-        # Key Metrics Table
-        doc.add_heading('Financial Metrics', level=3)
-        add_styled_table(doc,
-            ['ROE', 'Gross Margin', 'Net Margin', 'D/E', 'FCF Margin'],
-            [[
-                fmt_pct(company_data.get('roe')),
-                fmt_pct(company_data.get('gross_margin')),
-                fmt_pct(company_data.get('net_margin')),
-                str(company_data.get('debt_equity')) if company_data.get('debt_equity') else 'N/A',
-                fmt_pct(company_data.get('fcf_margin'))
-            ]]
-        )
+        # F.2 Risk Assessment
+        doc.add_heading('Risk Assessment', level=4)
 
-        doc.add_paragraph("")
-
-        # Valuation Analysis Section
-        doc.add_heading('Valuation Analysis', level=3)
-        for para in ai_analysis['valuation_analysis'].split('\n\n'):
-            if para.strip():
-                doc.add_paragraph(para.strip())
-
-        # Risk Assessment Section
-        doc.add_heading('Risk Assessment', level=3)
-
-        # AI anomaly analysis summary
         ai_rating = company_data.get('ai_rating', 'N/A')
         rating_desc = {
             'CLEAN': 'No significant distortions detected',
             'MINOR': 'Minor one-offs detected, not material to valuation',
-            'MATERIAL': 'Material distortions found, EPV adjustment may be needed'
+            'MATERIAL': 'Material distortions found, EPV adjustment may be needed',
         }
         add_styled_table(doc,
-            ['Assessment', 'Rating', 'Description'],
+            ['Indicator', 'Reading', 'Interpretation'],
             [
-                ['AI Anomaly Analysis', ai_rating,
-                 rating_desc.get(ai_rating, 'Analysis not available')],
+                ['AI Anomaly Rating', ai_rating, rating_desc.get(ai_rating, 'Analysis not available')],
                 ['Debt-to-Equity', str(company_data.get('debt_equity', 'N/A')),
                  'Balance sheet leverage indicator'],
-                ['ROIC-WACC Spread', str(company_data.get('roic_wacc', 'N/A')),
-                 'Value creation above cost of capital']
+                ['ROIC-WACC Spread', fmt_pct(company_data.get('roic_wacc')),
+                 'Value creation above cost of capital'],
             ]
         )
-
         doc.add_paragraph("")
 
-        # Include AI anomaly findings if available
         ai_anomaly_text = company_data.get('ai_analysis', '')
         if ai_anomaly_text:
-            doc.add_heading('AI Anomaly Findings', level=3)
+            doc.add_paragraph("AI anomaly findings:")
             for para in ai_anomaly_text.split('\n\n'):
                 if para.strip():
                     doc.add_paragraph(para.strip())
@@ -671,17 +1184,13 @@ def generate_professional_report(
             if para.strip():
                 doc.add_paragraph(para.strip())
 
-        # Investment Thesis Section
-        doc.add_heading('Investment Thesis', level=3)
+        # F.3 Investment Thesis
+        doc.add_heading('Investment Thesis', level=4)
         for para in ai_analysis['investment_thesis'].split('\n\n'):
             if para.strip():
-                p = doc.add_paragraph(para.strip())
+                doc.add_paragraph(para.strip())
 
-        doc.add_paragraph("")
-        doc.add_paragraph("─" * 50)  # Section divider
-        doc.add_paragraph("")
-
-    doc.add_page_break()
+        doc.add_page_break()
 
     # ========================================
     # 4. MANAGEMENT QUALITY ASSESSMENT
@@ -867,7 +1376,7 @@ def generate_professional_report(
     footer = doc.add_paragraph()
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
     footer.add_run("─" * 40)
-    footer.add_run(f"\nGenerated by Value Investment Academy | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    footer.add_run(f"\nGenerated by VIA Financial Analysis Platform | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     footer.add_run("\nPowered by AI-Enhanced Analysis")
 
     # Save to buffer

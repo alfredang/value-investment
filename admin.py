@@ -21,7 +21,7 @@ ADMIN_PASSWORD_HASH_KEY = "admin_password_hash"
 @dataclass
 class APIKeys:
     """API Keys configuration."""
-    openai_api_key: str = ""
+    anthropic_api_key: str = ""
     tavily_api_key: str = ""
     news_api_key: str = ""
     twelve_data_api_key: str = ""
@@ -50,21 +50,17 @@ class DataProviderConfig:
 @dataclass
 class LLMConfig:
     """LLM Model configuration."""
-    model: str = "gpt-4o"  # Default model
+    model: str = "claude-sonnet-4-6"  # Default model
     temperature: float = 0.7
     max_tokens: int = 4096
 
     @staticmethod
     def available_models() -> list:
-        """List of available OpenAI models."""
+        """List of available Claude models."""
         return [
-            "gpt-4o",
-            "gpt-4o-mini",
-            "gpt-4-turbo",
-            "gpt-4",
-            "gpt-3.5-turbo",
-            "o1",
-            "o1-mini",
+            "claude-opus-4-7",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5-20251001",
         ]
 
 
@@ -118,9 +114,8 @@ def load_config() -> AppConfig:
 
             # Parse nested configs
             api_keys_data = data.get("api_keys", {})
-            # Handle missing morningstar key for backward compatibility
             api_keys = APIKeys(
-                openai_api_key=api_keys_data.get("openai_api_key", ""),
+                anthropic_api_key=api_keys_data.get("anthropic_api_key", ""),
                 tavily_api_key=api_keys_data.get("tavily_api_key", ""),
                 news_api_key=api_keys_data.get("news_api_key", ""),
                 twelve_data_api_key=api_keys_data.get("twelve_data_api_key", ""),
@@ -198,7 +193,7 @@ def get_api_keys() -> APIKeys:
 
     # Override with environment variables if set
     return APIKeys(
-        openai_api_key=os.getenv("OPENAI_API_KEY", "") or config.api_keys.openai_api_key,
+        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", "") or config.api_keys.anthropic_api_key,
         tavily_api_key=os.getenv("TAVILY_API_KEY", "") or config.api_keys.tavily_api_key,
         news_api_key=os.getenv("NEWS_API_KEY", "") or config.api_keys.news_api_key,
         twelve_data_api_key=os.getenv("TWELVE_DATA_API_KEY", "") or config.api_keys.twelve_data_api_key,
@@ -214,8 +209,8 @@ def get_data_provider_config() -> DataProviderConfig:
 
 def apply_api_keys_to_env(api_keys: APIKeys):
     """Apply API keys to environment variables."""
-    if api_keys.openai_api_key:
-        os.environ["OPENAI_API_KEY"] = api_keys.openai_api_key
+    if api_keys.anthropic_api_key:
+        os.environ["ANTHROPIC_API_KEY"] = api_keys.anthropic_api_key
     if api_keys.tavily_api_key:
         os.environ["TAVILY_API_KEY"] = api_keys.tavily_api_key
     if api_keys.news_api_key:
@@ -314,18 +309,18 @@ def show_api_keys_tab(config: AppConfig):
     # Get current keys (from config or env)
     current_keys = get_api_keys()
 
-    # OpenAI
-    st.markdown("### OpenAI API Key")
-    st.markdown("Required for AI agent features. Get from [platform.openai.com](https://platform.openai.com)")
-    new_openai = st.text_input(
-        "OpenAI API Key",
-        value=current_keys.openai_api_key,
-        type="password",
-        key="admin_openai_key",
-        help="Your OpenAI API key (sk-...)"
+    # Claude authentication (no API key needed — uses Claude Code CLI subscription)
+    st.markdown("### Claude Authentication")
+    st.info(
+        "This app uses **claude-agent-sdk** which authenticates via your local "
+        "Claude Code CLI subscription. No API key needed.\n\n"
+        "**Setup (one-time):**\n"
+        "1. Install Node.js\n"
+        "2. Install Claude Code CLI: `npm install -g @anthropic-ai/claude-code`\n"
+        "3. Run `claude /login` and complete OAuth\n\n"
+        "Once logged in, all AI features in this app will work."
     )
-    if current_keys.openai_api_key:
-        st.success("✓ OpenAI API key configured")
+    new_anthropic = ""  # legacy field kept zeroed for save compatibility
 
     # Tavily
     st.markdown("### Tavily API Key")
@@ -379,7 +374,7 @@ def show_api_keys_tab(config: AppConfig):
     # Save button
     if st.button("💾 Save API Keys", type="primary"):
         config.api_keys = APIKeys(
-            openai_api_key=new_openai,
+            anthropic_api_key=new_anthropic,
             tavily_api_key=new_tavily,
             news_api_key=new_news,
             twelve_data_api_key=new_twelve,
@@ -498,18 +493,14 @@ def show_llm_settings_tab(config: AppConfig):
         "Model",
         options=LLMConfig.available_models(),
         index=LLMConfig.available_models().index(current_model) if current_model in LLMConfig.available_models() else 0,
-        help="Select the OpenAI model to use"
+        help="Select the Claude model to use"
     )
 
     # Model descriptions
     model_info = {
-        "gpt-4o": "Most capable model. Best for complex analysis. Fast responses.",
-        "gpt-4o-mini": "Smaller, faster, cheaper version of GPT-4o. Good balance.",
-        "gpt-4-turbo": "Powerful model with large context. Good for detailed analysis.",
-        "gpt-4": "Original GPT-4. Very capable but slower.",
-        "gpt-3.5-turbo": "Fast and cheap. Good for simple tasks.",
-        "o1": "Advanced reasoning model. Best for complex problems.",
-        "o1-mini": "Smaller reasoning model. Good for focused analysis."
+        "claude-opus-4-7": "Most capable Claude model. Best for forensic analysis and complex reasoning. Higher cost.",
+        "claude-sonnet-4-6": "Balanced default. Strong analytical quality with good speed and cost.",
+        "claude-haiku-4-5-20251001": "Fastest and cheapest. Good for chat assistant and high-volume report generation.",
     }
     if new_model in model_info:
         st.info(model_info[new_model])
