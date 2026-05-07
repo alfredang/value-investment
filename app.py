@@ -75,7 +75,7 @@ def get_fmp_client():
 
 # Page configuration
 st.set_page_config(
-    page_title="Value Investment Academy",
+    page_title="VIA Financial Analysis Platform",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -561,19 +561,15 @@ def show_company_detail_popup(symbol: str, data: dict):
 
 
 def init_config():
-    """Initialize configuration from admin settings."""
-    # First, check for API key in environment (from .env file)
-    env_api_key = os.getenv('OPENAI_API_KEY', '')
-    if env_api_key:
-        st.session_state['openai_api_key'] = env_api_key
+    """Initialize configuration from admin settings.
 
+    Auth: by default uses Claude Code CLI subscription via claude-agent-sdk.
+    A user-supplied API key in session_state['anthropic_api_key'] overrides
+    this and gets pushed to ANTHROPIC_API_KEY env var on each rerun.
+    """
     if ADMIN_AVAILABLE:
         api_keys = get_api_keys()
         apply_api_keys_to_env(api_keys)
-
-        # Also set in session state if available from config
-        if api_keys.openai_api_key:
-            st.session_state['openai_api_key'] = api_keys.openai_api_key
 
         # Load LLM config into session state
         config = load_config()
@@ -584,17 +580,20 @@ def init_config():
         if 'analysis_config' not in st.session_state:
             st.session_state['analysis_config'] = config.analysis_config
 
+    # Re-apply any user-supplied credential to the appropriate env var on each
+    # rerun. We support either an Anthropic API key OR a Claude Code OAuth token.
+    cred = st.session_state.get('anthropic_credential', '').strip()
+    cred_type = st.session_state.get('credential_type', '')
+    if cred and cred_type == 'api_key':
+        os.environ['ANTHROPIC_API_KEY'] = cred
+    elif cred and cred_type == 'oauth_token':
+        os.environ['CLAUDE_CODE_OAUTH_TOKEN'] = cred
+
 
 def get_ai_agent(agent_type: str = "general"):
-    """Get AI agent instance if API key is available."""
-    # Check for API key in session state or environment
-    api_key = st.session_state.get('openai_api_key', '') or os.getenv('OPENAI_API_KEY', '')
-
-    if api_key and AI_AVAILABLE:
+    """Get AI agent instance. Auth is via Claude Code CLI subscription."""
+    if AI_AVAILABLE:
         try:
-            # Set the API key in environment for agents
-            os.environ['OPENAI_API_KEY'] = api_key
-
             if agent_type == "screening":
                 return ScreeningAgent()
             elif agent_type == "anomaly":
@@ -626,10 +625,8 @@ def show_persistent_chat():
                 else:
                     st.markdown(f"**AI:** {message['content']}")
 
-    # Check for API key
-    api_key = st.session_state.get('openai_api_key', '') or os.getenv('OPENAI_API_KEY', '')
-
-    if api_key:
+    # Claude auth is handled by Claude Code CLI subscription — no key check needed
+    if AI_AVAILABLE:
         with st.form("persistent_chat_form", clear_on_submit=True):
             user_input = st.text_input(
                 "Ask anything about value investing...",
@@ -648,12 +645,10 @@ def show_persistent_chat():
                 "content": user_input
             })
 
-            # Get AI response using direct OpenAI client (no agents SDK)
+            # Get AI response via claude-agent-sdk (uses Claude Code CLI subscription auth)
             with st.spinner("Thinking..."):
                 try:
-                    from openai import OpenAI
-
-                    client = OpenAI(api_key=api_key)
+                    from llm import claude_complete
 
                     # Build context from session
                     system_prompt = """You are a helpful value investing assistant. You help users:
@@ -678,24 +673,26 @@ Be concise but thorough. Use specific numbers when available."""
                     if context_info:
                         system_prompt += f"\n\nCurrent session context:{context_info}"
 
-                    # Build messages for API
-                    messages = [{"role": "system", "content": system_prompt}]
+                    # claude-agent-sdk's query() is one-shot per call. Fold recent
+                    # conversation history into the user prompt so context survives.
+                    recent = st.session_state.persistent_chat_messages[-6:]
+                    if len(recent) > 1:
+                        history_lines = []
+                        for msg in recent[:-1]:
+                            role = "User" if msg["role"] == "user" else "Assistant"
+                            history_lines.append(f"{role}: {msg['content']}")
+                        history_lines.append(f"User: {recent[-1]['content']}")
+                        user_prompt = "Recent conversation:\n" + "\n".join(history_lines)
+                    else:
+                        user_prompt = recent[-1]["content"]
 
-                    # Add recent conversation history
-                    for msg in st.session_state.persistent_chat_messages[-6:]:
-                        messages.append({"role": msg["role"], "content": msg["content"]})
+                    model = st.session_state.get('llm_model', 'claude-sonnet-4-6')
 
-                    # Get model from session state or default
-                    model = st.session_state.get('llm_model', 'gpt-4o-mini')
-
-                    response = client.chat.completions.create(
+                    assistant_message = claude_complete(
+                        user=user_prompt,
+                        system=system_prompt,
                         model=model,
-                        messages=messages,
-                        max_tokens=1000,
-                        temperature=0.7
                     )
-
-                    assistant_message = response.choices[0].message.content
 
                     st.session_state.persistent_chat_messages.append({
                         "role": "assistant",
@@ -715,8 +712,8 @@ Be concise but thorough. Use specific numbers when available."""
                 st.rerun()
     else:
         # Show chat input disabled
-        st.text_input("Ask anything...", disabled=True, placeholder="Configure API key first")
-        st.caption("Enter OpenAI API key in ⚙️ Settings to enable AI Assistant")
+        st.text_input("Ask anything...", disabled=True, placeholder="claude-agent-sdk not available")
+        st.caption("Install claude-agent-sdk and run `claude /login` to enable AI Assistant")
 
 
 def main():
@@ -735,7 +732,7 @@ def main():
     # Main page - Header with settings button
     col1, col2 = st.columns([6, 1])
     with col1:
-        st.title("📈 Value Investment Academy")
+        st.title("📈 VIA Financial Analysis Platform")
     with col2:
         if ADMIN_AVAILABLE:
             if st.button("⚙️", help="Settings"):
@@ -743,6 +740,68 @@ def main():
                 st.rerun()
 
     st.markdown("*AI-powered stock screening, anomaly detection, and investment analysis*")
+
+    # ----------------------------------------------------------------
+    # Auth: accept either an Anthropic API key (sk-ant-...) OR a Claude Code
+    # subscription OAuth token. Auto-detects by prefix and sets the right env var.
+    # ----------------------------------------------------------------
+    _saved_credential = st.session_state.get('anthropic_credential', '').strip()
+    _credential_type = st.session_state.get('credential_type', '')  # 'api_key' | 'oauth_token' | ''
+
+    if _credential_type == 'api_key':
+        _auth_label = "🔑 API key configured — using Anthropic API (paid)"
+    elif _credential_type == 'oauth_token':
+        _auth_label = "🎫 Subscription token configured — using Claude Code subscription"
+    else:
+        _auth_label = "🔓 Using local Claude Code CLI subscription (no credential set)"
+
+    with st.expander(_auth_label, expanded=False):
+        st.caption(
+            "Paste either an Anthropic **API key** (starts with `sk-ant-...`) for paid API "
+            "access, OR a Claude Code **subscription OAuth token** to authenticate via your "
+            "Claude subscription. Leave blank to use the local `claude /login` session."
+        )
+        col_key, col_btn = st.columns([4, 1])
+        with col_key:
+            new_credential = st.text_input(
+                "API Key or Subscription Token",
+                value=_saved_credential,
+                type="password",
+                placeholder="sk-ant-... (API key) or paste your Claude Code subscription token",
+                help=(
+                    "API key format: starts with sk-ant-... (from console.anthropic.com)\n"
+                    "Subscription token: long OAuth token from your Claude Code account\n"
+                    "Auto-detected by prefix; correct env var is set automatically."
+                ),
+                label_visibility="collapsed",
+                key="credential_input",
+            )
+        with col_btn:
+            if st.button("Save", use_container_width=True, key="save_credential_btn"):
+                cleaned = (new_credential or '').strip()
+                # Always wipe both env vars first so we don't leave stale ones
+                os.environ.pop('ANTHROPIC_API_KEY', None)
+                os.environ.pop('CLAUDE_CODE_OAUTH_TOKEN', None)
+                if cleaned:
+                    if cleaned.startswith('sk-ant-'):
+                        os.environ['ANTHROPIC_API_KEY'] = cleaned
+                        st.session_state['credential_type'] = 'api_key'
+                    else:
+                        os.environ['CLAUDE_CODE_OAUTH_TOKEN'] = cleaned
+                        st.session_state['credential_type'] = 'oauth_token'
+                    st.session_state['anthropic_credential'] = cleaned
+                else:
+                    st.session_state['credential_type'] = ''
+                    st.session_state['anthropic_credential'] = ''
+                st.rerun()
+        if _saved_credential:
+            if st.button("Clear credential (revert to local CLI login)",
+                         key="clear_credential_btn"):
+                st.session_state['anthropic_credential'] = ''
+                st.session_state['credential_type'] = ''
+                os.environ.pop('ANTHROPIC_API_KEY', None)
+                os.environ.pop('CLAUDE_CODE_OAUTH_TOKEN', None)
+                st.rerun()
 
     # Show the tab-based workflow
     show_tabbed_workflow()
@@ -1216,10 +1275,9 @@ Stocks are classified based on the ratio thresholds you set below:
                      "**revenue/earnings spikes or drops**, and other distortions that may not reflect "
                      "the company's normal earning power.")
 
-            # Check for API key
-            api_key = st.session_state.get('openai_api_key', '') or os.getenv('OPENAI_API_KEY', '')
-            if not api_key:
-                st.error("OpenAI API key required for AI anomaly analysis. Configure in Settings.")
+            # Auth handled by Claude Code CLI subscription (no API key needed)
+            if not AI_AVAILABLE:
+                st.error("claude-agent-sdk not installed. Run `pip install -r requirements.txt`.")
             else:
                 if st.button("🤖 Run AI Anomaly Detection", type="primary", use_container_width=True):
                     results = {}
@@ -1300,11 +1358,10 @@ Stocks are classified based on the ratio thresholds you set below:
                                     }
                                 }
 
-                        # --- Call OpenAI for AI analysis ---
+                        # --- Call Claude via claude-agent-sdk for AI analysis ---
                         try:
-                            from openai import OpenAI
-                            client = OpenAI(api_key=api_key)
-                            model = st.session_state.get('llm_model', 'gpt-4o-mini')
+                            from llm import claude_complete
+                            model = st.session_state.get('llm_model', 'claude-sonnet-4-6')
 
                             # Get company name from screening data
                             filt_df = st.session_state.workflow_data.get('filtered_df')
@@ -1340,24 +1397,25 @@ FORMAT YOUR RESPONSE AS:
 **Impact on Valuation:**
 [1-2 sentences on whether EPV needs adjustment and why]"""
 
-                            response = client.chat.completions.create(
+                            ai_text = claude_complete(
+                                user=prompt,
+                                system="You are a forensic financial analyst specializing in detecting one-off distortions and anomalies in company financials. Be specific about years and magnitudes. If data is limited, state what you can and cannot assess. ALWAYS begin your response with one of these exact phrases: 'Overall: CLEAN', 'Overall: MINOR', or 'Overall: MATERIAL'.",
                                 model=model,
-                                messages=[
-                                    {"role": "system", "content": "You are a forensic financial analyst specializing in detecting one-off distortions and anomalies in company financials. Be specific about years and magnitudes. If data is limited, state what you can and cannot assess."},
-                                    {"role": "user", "content": prompt}
-                                ],
-                                max_tokens=800,
-                                temperature=0.3
                             )
 
-                            ai_text = response.choices[0].message.content
-
-                            # Parse overall rating
+                            # Parse overall rating - prefer explicit "Overall: X" pattern,
+                            # fall back to first occurrence anywhere in response
+                            import re as _re
                             rating = 'UNKNOWN'
-                            for r in ['CLEAN', 'MINOR', 'MATERIAL']:
-                                if r in ai_text.upper()[:100]:
-                                    rating = r
-                                    break
+                            ai_upper = ai_text.upper()
+                            m = _re.search(r"OVERALL\s*[:.\-]?\s*\*{0,2}\s*(CLEAN|MINOR|MATERIAL)", ai_upper)
+                            if m:
+                                rating = m.group(1)
+                            else:
+                                for r in ['CLEAN', 'MINOR', 'MATERIAL']:
+                                    if r in ai_upper:
+                                        rating = r
+                                        break
 
                             results[sym] = {
                                 'analysis': ai_text,
@@ -1440,6 +1498,11 @@ FORMAT YOUR RESPONSE AS:
                 report_data.append({
                     'symbol': sym,
                     'company': stock.get('Company', 'N/A'),
+                    'sector': stock.get('Sector', 'N/A'),
+                    'industry': stock.get('Industry', 'N/A'),
+                    'subindustry': stock.get('Subindustry', 'N/A'),
+                    'exchange': stock.get('Exchange', 'N/A'),
+                    'currency': stock.get('Currency', 'USD'),
                     'valuation': stock.get('Valuation', 'N/A'),
                     'ai_rating': anom.get('rating', 'N/A'),
                     'ai_analysis': anom.get('analysis', ''),
@@ -1457,11 +1520,85 @@ FORMAT YOUR RESPONSE AS:
                     'epv': stock.get('Earnings Power Value (EPV)'),
                     'market_cap': stock.get('Market Cap ($M)'),
                     'current_price': stock.get('Current Price'),
+                    'pe_ratio': stock.get('PE Ratio (TTM)'),
+                    'fcf_growth': stock.get('5-Year FCF Growth Rate (Per Share)'),
+                    'low_iv': stock.get('Low IV'),
+                    'high_iv': stock.get('High IV'),
                 })
 
             # Render professional summary report dashboard
             from summary_report import render_summary_report
             render_summary_report(report_data)
+
+            st.markdown("---")
+
+            # ============================================================
+            # COMPETITOR COMPARISON (financials of company vs peers)
+            # ============================================================
+            st.markdown("### 📊 Competitor Comparison")
+            st.caption("Compare each final candidate against peers in the same Sector + Industry from your screening universe.")
+
+            full_universe = st.session_state.workflow_data.get('filtered_df')
+            if full_universe is None or full_universe.empty:
+                st.info("No screening universe available — re-run Step 1 to enable competitor analysis.")
+            else:
+                from peer_finder import find_peers, build_peer_metrics_frame, peer_search_summary
+                from chart_engine import make_competitor_bar_chart_plotly
+
+                comparable_symbols = [d['symbol'] for d in report_data]
+                if not comparable_symbols:
+                    st.info("No companies selected for comparison.")
+                else:
+                    selected_for_compare = st.selectbox(
+                        "Choose a company to compare against peers:",
+                        options=comparable_symbols,
+                        format_func=lambda s: f"{s} — {next((d['company'] for d in report_data if d['symbol'] == s), s)}",
+                        key="competitor_compare_select",
+                    )
+
+                    target_rows = full_universe[full_universe['Symbol'] == selected_for_compare]
+                    if target_rows.empty:
+                        st.warning(f"Could not find {selected_for_compare} in the screening data.")
+                    else:
+                        target_row = target_rows.iloc[0]
+                        peers = find_peers(selected_for_compare, full_universe, limit=5)
+                        st.markdown(f"**{peer_search_summary(selected_for_compare, peers, target_row.get('Industry'))}**")
+
+                        if peers.empty:
+                            st.info("No peers found in the screening universe — try widening your screening criteria to include more companies in the same industry.")
+                        else:
+                            # Side-by-side metrics table
+                            metrics_df = build_peer_metrics_frame(target_row, peers)
+                            display_df = metrics_df.copy()
+                            display_df.insert(0, 'Company', [
+                                full_universe[full_universe['Symbol'] == s].iloc[0].get('Company', '')[:30]
+                                if s in full_universe['Symbol'].values else ''
+                                for s in display_df.index
+                            ])
+
+                            st.markdown("**Metrics side-by-side**")
+                            st.dataframe(display_df.round(2), use_container_width=True)
+
+                            # Bar charts — 5 key metrics
+                            chart_specs = [
+                                ('ROE %', 'Return on Equity', True),
+                                ('Net Margin %', 'Net Margin', True),
+                                ('FCF Margin %', 'FCF Margin', True),
+                                ('5-Year Revenue Growth Rate (Per Share)', '5-Year Revenue Growth', True),
+                                ('Debt-to-Equity', 'Debt-to-Equity', False),
+                            ]
+                            chart_cols = st.columns(2)
+                            for i, (col_name, label, is_pct) in enumerate(chart_specs):
+                                fig = make_competitor_bar_chart_plotly(
+                                    metric_label=label,
+                                    metrics_df=metrics_df,
+                                    metric_column=col_name,
+                                    target_symbol=selected_for_compare,
+                                    is_percentage=is_pct,
+                                )
+                                if fig is not None:
+                                    with chart_cols[i % 2]:
+                                        st.plotly_chart(fig, use_container_width=True)
 
             st.markdown("---")
 
@@ -1474,9 +1611,8 @@ FORMAT YOUR RESPONSE AS:
             with col2:
                 if st.button("📄 Generate AI-Enhanced Professional Report", type="primary", use_container_width=True):
                     # Check for API key
-                    api_key = st.session_state.get('openai_api_key', '') or os.getenv('OPENAI_API_KEY', '')
-                    if not api_key:
-                        st.error("OpenAI API key required for AI-enhanced report generation. Please configure in sidebar.")
+                    if not AI_AVAILABLE:
+                        st.error("claude-agent-sdk not installed. Run `pip install -r requirements.txt`.")
                     else:
                         try:
                             from enhanced_report import generate_professional_report
@@ -1497,8 +1633,9 @@ FORMAT YOUR RESPONSE AS:
                                 buffer = generate_professional_report(
                                     report_data=report_data,
                                     criteria=criteria,
-                                    api_key=api_key,
-                                    progress_callback=update_progress
+                                    api_key=None,  # auth via Claude Code CLI
+                                    progress_callback=update_progress,
+                                    universe_df=st.session_state.workflow_data.get('filtered_df'),
                                 )
 
                             progress_bar.progress(100)
@@ -1793,7 +1930,7 @@ User question: {user_question}"""
                 else:
                     st.warning("Please enter a question for the AI agent.")
         else:
-            st.info("💡 Add your OpenAI API key to .env or enter in sidebar to enable AI agent features.")
+            st.info("💡 Install claude-agent-sdk and run `claude /login` to enable AI agent features.")
 
 
 def show_anomaly_page():
@@ -1978,7 +2115,7 @@ def show_anomaly_page():
                         except Exception as e:
                             st.error(f"AI agent error: {e}")
             else:
-                st.info("💡 Add your OpenAI API key to .env or enter in sidebar to enable AI agent features.")
+                st.info("💡 Install claude-agent-sdk and run `claude /login` to enable AI agent features.")
 
     except Exception as e:
         st.error(f"Error reading file: {e}")
@@ -1991,12 +2128,13 @@ def show_chatbot_page():
     # Check if AI is available
     agent = get_ai_agent("general")
     if not agent:
-        st.warning("⚠️ AI features require an OpenAI API key. Please add your API key in the sidebar or create a .env file.")
+        st.warning("⚠️ AI features require **claude-agent-sdk** + Claude Code CLI authenticated.")
         st.info("""
-        **How to enable AI:**
-        1. Get an API key from [OpenAI](https://platform.openai.com)
-        2. Either enter the key in the sidebar, or
-        3. Create a `.env` file with: `OPENAI_API_KEY=your-key-here`
+        **How to enable AI (one-time setup):**
+        1. Install Node.js
+        2. Install Claude Code CLI: `npm install -g @anthropic-ai/claude-code`
+        3. Run `claude /login` and complete OAuth (uses your Claude subscription)
+        4. Install Python deps: `pip install -r requirements.txt`
         """)
         return
 
@@ -2176,7 +2314,7 @@ def show_about_page():
     - Cash flow consistency checks
     - 🤖 **AI Interpretation**: Understand what anomalies mean
 
-    ### AI Agent Features (requires OpenAI API key)
+    ### AI Agent Features (requires Claude Code CLI authenticated)
 
     - **Screening Agent**: Specialized AI that helps find value stocks and explains picks
     - **Anomaly Agent**: Forensic AI that interprets financial red flags
@@ -2193,12 +2331,12 @@ def show_about_page():
 
     ### How to Enable AI
 
-    1. Get an API key from [OpenAI](https://platform.openai.com)
-    2. Enter the key in the sidebar
-    3. Click "Generate AI Analysis" on any results page
+    1. Install Node.js, then `npm install -g @anthropic-ai/claude-code`
+    2. Run `claude /login` once to authenticate with your Claude subscription
+    3. AI features are enabled automatically — no API key needed
 
     ---
-    Built with Streamlit & OpenAI | [GitHub Repository](https://github.com/alfredang/value-investment)
+    Built with Streamlit & Claude | [GitHub Repository](https://github.com/alfredang/value-investment)
     """)
 
 

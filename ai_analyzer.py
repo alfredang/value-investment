@@ -1,34 +1,32 @@
 """
-AI-powered analysis module using OpenAI.
+AI-powered analysis module using Claude (via claude-agent-sdk).
 
 Provides intelligent analysis, summaries, and recommendations for stocks.
+All LLM calls route through llm.claude_complete which uses the local
+Claude Code CLI subscription auth.
 """
 import json
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Any
 import pandas as pd
 
-try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
+from llm import claude_complete, DEFAULT_MODEL
 
 
 class AIAnalyzer:
-    """AI-powered stock analysis using OpenAI."""
+    """AI-powered stock analysis using Claude via claude-agent-sdk."""
 
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, model: str = DEFAULT_MODEL):
         """
-        Initialize the AI analyzer.
-
         Args:
-            api_key: OpenAI API key. If None, will try to get from environment.
+            api_key: Ignored. Auth is handled by Claude Code CLI login.
+                     Kept for backward-compat with callers that still pass it.
+            model: Claude model ID. Defaults to claude-sonnet-4-6.
         """
-        if not OPENAI_AVAILABLE:
-            raise ImportError("OpenAI package not installed. Run: pip install openai")
+        self.model = model
 
-        self.client = OpenAI(api_key=api_key)
-        self.model = "gpt-4o"  # Use GPT-4o for best analysis
+    def _complete(self, system: str, user: str) -> str:
+        """Single-turn Claude completion."""
+        return claude_complete(user=user, system=system, model=self.model)
 
     def analyze_screened_stocks(
         self,
@@ -36,25 +34,12 @@ class AIAnalyzer:
         criteria: Dict[str, float],
         top_n: int = 10
     ) -> str:
-        """
-        Provide AI analysis of screened stocks.
-
-        Args:
-            stocks_df: DataFrame of screened stocks
-            criteria: Screening criteria used
-            top_n: Number of top stocks to analyze in detail
-
-        Returns:
-            AI-generated analysis and recommendations
-        """
-        # Prepare stock data for analysis
+        """Provide AI analysis of screened stocks."""
         if len(stocks_df) == 0:
             return "No stocks matched the criteria. Consider relaxing your filters."
 
-        # Get top stocks for detailed analysis
         top_stocks = stocks_df.head(top_n).to_dict('records')
 
-        # Summary statistics
         summary = {
             'total_matches': len(stocks_df),
             'sectors': stocks_df['Sector'].value_counts().head(5).to_dict() if 'Sector' in stocks_df.columns else {},
@@ -87,17 +72,10 @@ Please provide:
 
 Keep the analysis concise but insightful. Focus on value investing principles."""
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": "You are a professional value investing analyst providing data-driven stock analysis."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=1500,
-            temperature=0.7
+        return self._complete(
+            system="You are a professional value investing analyst providing data-driven stock analysis.",
+            user=prompt,
         )
-
-        return response.choices[0].message.content
 
     def analyze_anomaly_report(
         self,
@@ -107,19 +85,7 @@ Keep the analysis concise but insightful. Focus on value investing principles.""
         quality_scores: Dict[str, float],
         risk_level: str
     ) -> str:
-        """
-        Provide AI analysis of anomaly detection results.
-
-        Args:
-            symbol: Stock ticker
-            company_name: Company name
-            anomalies: List of detected anomalies
-            quality_scores: M-Score, Z-Score, F-Score, etc.
-            risk_level: Overall risk assessment
-
-        Returns:
-            AI-generated analysis and interpretation
-        """
+        """Provide AI analysis of anomaly detection results."""
         prompt = f"""You are a forensic accounting expert analyzing financial anomalies. Review the following anomaly report and provide interpretation.
 
 COMPANY: {symbol} - {company_name}
@@ -146,17 +112,10 @@ Please provide:
 
 Be balanced - distinguish between normal business volatility and genuinely concerning patterns."""
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": "You are a forensic accounting expert specializing in detecting financial fraud and anomalies."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=1500,
-            temperature=0.7
+        return self._complete(
+            system="You are a forensic accounting expert specializing in detecting financial fraud and anomalies.",
+            user=prompt,
         )
-
-        return response.choices[0].message.content
 
     def generate_investment_thesis(
         self,
@@ -164,17 +123,7 @@ Be balanced - distinguish between normal business volatility and genuinely conce
         valuation_status: str,
         epv_mc_ratio: float
     ) -> str:
-        """
-        Generate an investment thesis for a specific stock.
-
-        Args:
-            stock_data: Dictionary with stock fundamentals
-            valuation_status: Undervalued/Fair Value/Overvalued
-            epv_mc_ratio: EPV to Market Cap ratio
-
-        Returns:
-            AI-generated investment thesis
-        """
+        """Generate an investment thesis for a specific stock."""
         prompt = f"""You are a value investing analyst. Generate a brief investment thesis for the following stock.
 
 STOCK DATA:
@@ -193,33 +142,17 @@ Generate a concise investment thesis covering:
 
 Keep it practical and actionable for a value investor."""
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": "You are a value investing analyst creating investment theses."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=800,
-            temperature=0.7
+        return self._complete(
+            system="You are a value investing analyst creating investment theses.",
+            user=prompt,
         )
-
-        return response.choices[0].message.content
 
     def compare_stocks(
         self,
         stocks: List[Dict],
         criteria: str = "value"
     ) -> str:
-        """
-        Compare multiple stocks and rank them.
-
-        Args:
-            stocks: List of stock dictionaries with fundamentals
-            criteria: Comparison focus (value, quality, growth)
-
-        Returns:
-            AI-generated comparison and ranking
-        """
+        """Compare multiple stocks and rank them."""
         prompt = f"""You are a value investing analyst. Compare the following stocks and provide a ranking.
 
 COMPARISON FOCUS: {criteria}
@@ -235,33 +168,17 @@ Provide:
 
 Focus on value investing principles: margin of safety, earnings power, balance sheet strength."""
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": "You are a value investing analyst comparing investment opportunities."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=1000,
-            temperature=0.7
+        return self._complete(
+            system="You are a value investing analyst comparing investment opportunities.",
+            user=prompt,
         )
-
-        return response.choices[0].message.content
 
     def summarize_for_executive(
         self,
         analysis_text: str,
         context: str = "stock screening"
     ) -> str:
-        """
-        Create an executive summary of analysis.
-
-        Args:
-            analysis_text: Full analysis text to summarize
-            context: Type of analysis (screening, anomaly, comparison)
-
-        Returns:
-            Brief executive summary (3-5 bullet points)
-        """
+        """Create an executive summary of analysis."""
         prompt = f"""Summarize the following {context} analysis into an executive brief.
 
 ANALYSIS:
@@ -270,19 +187,16 @@ ANALYSIS:
 Create a 3-5 bullet point executive summary that a busy investor can scan in 30 seconds.
 Focus on: key findings, top recommendations, and critical action items."""
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": "You create concise executive summaries for busy investors."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=300,
-            temperature=0.5
+        return self._complete(
+            system="You create concise executive summaries for busy investors.",
+            user=prompt,
         )
 
-        return response.choices[0].message.content
 
-
-def check_openai_available() -> bool:
-    """Check if OpenAI package is available."""
-    return OPENAI_AVAILABLE
+def check_anthropic_available() -> bool:
+    """Check if Claude Agent SDK is available (kept for backward compat with caller name)."""
+    try:
+        import claude_agent_sdk  # noqa: F401
+        return True
+    except ImportError:
+        return False

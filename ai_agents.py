@@ -1,11 +1,17 @@
 """
-AI Agents for Value Investment Analysis using OpenAI Agents SDK.
+AI Agents for Value Investment Analysis using the Claude Agent SDK.
 
 This module provides specialized agents with:
-- Handoff patterns for agent coordination
+- Subagent dispatch via Claude's Task tool
 - Web search via Tavily for real-time data
 - News API for market updates
-- Tool-based stock screening and anomaly detection
+- In-process MCP server exposing screening, valuation, and anomaly tools
+
+Public API is preserved for backward compatibility with app.py:
+    ValueInvestmentAgent, ScreeningAgent, AnomalyAgent, ResearchAgent
+    AgentResponse
+    chat(), chat_async(), reset_conversation()
+    quick_screen(), quick_analyze(), run_full_analysis()
 """
 import os
 import json
@@ -15,12 +21,20 @@ from dataclasses import dataclass, field
 import pandas as pd
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-# OpenAI Agents SDK imports
-from agents import Agent, Runner, function_tool, handoff, RunContextWrapper
-from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
+# Claude Agent SDK imports
+from claude_agent_sdk import (
+    ClaudeSDKClient,
+    ClaudeAgentOptions,
+    AgentDefinition,
+    tool,
+    create_sdk_mcp_server,
+    AssistantMessage,
+    TextBlock,
+    ToolUseBlock,
+    ResultMessage,
+)
 
 # Optional: Tavily for web search
 try:
@@ -29,7 +43,7 @@ try:
 except ImportError:
     TAVILY_AVAILABLE = False
 
-# Optional: httpx for news API
+# Optional: httpx for news / price APIs
 try:
     import httpx
     HTTPX_AVAILABLE = True
@@ -37,37 +51,45 @@ except ImportError:
     HTTPX_AVAILABLE = False
 
 
+DEFAULT_MODEL = "claude-sonnet-4-6"
+
+
 # ============================================================================
-# Tool Functions - Decorated with @function_tool for Agents SDK
+# Tool Functions - Decorated with @tool for Claude Agent SDK MCP server
+#
+# Tool signature: async def name(args: dict) -> dict
+# Return shape:   {"content": [{"type": "text", "text": <json_string>}]}
 # ============================================================================
 
-@function_tool
-def screen_stocks(
-    market: str,
-    gross_margin_min: float = None,
-    net_margin_min: float = None,
-    roe_min: float = None,
-    roa_min: float = None,
-    debt_equity_max: float = None,
-    fcf_margin_min: float = None,
-    roic_wacc_min: float = None
-) -> str:
-    """
-    Screen stocks based on fundamental criteria.
+def _ok(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a successful MCP tool response."""
+    return {"content": [{"type": "text", "text": json.dumps(payload, default=str)}]}
 
-    Args:
-        market: 'US' or 'SG' market
-        gross_margin_min: Minimum gross margin percentage
-        net_margin_min: Minimum net margin percentage
-        roe_min: Minimum return on equity
-        roa_min: Minimum return on assets
-        debt_equity_max: Maximum debt-to-equity ratio
-        fcf_margin_min: Minimum free cash flow margin
-        roic_wacc_min: Minimum ROIC minus WACC
 
-    Returns:
-        JSON string with screening results
-    """
+def _err(message: str) -> Dict[str, Any]:
+    """Build an error MCP tool response."""
+    return {"content": [{"type": "text", "text": json.dumps({"success": False, "error": message})}]}
+
+
+@tool(
+    "screen_stocks",
+    "Screen stocks based on fundamental value-investing criteria for a market.",
+    {
+        "type": "object",
+        "properties": {
+            "market": {"type": "string", "description": "'US' or 'SG'"},
+            "gross_margin_min": {"type": "number", "description": "Minimum gross margin %"},
+            "net_margin_min": {"type": "number", "description": "Minimum net margin %"},
+            "roe_min": {"type": "number", "description": "Minimum return on equity %"},
+            "roa_min": {"type": "number", "description": "Minimum return on assets %"},
+            "debt_equity_max": {"type": "number", "description": "Maximum debt-to-equity ratio"},
+            "fcf_margin_min": {"type": "number", "description": "Minimum free cash flow margin %"},
+            "roic_wacc_min": {"type": "number", "description": "Minimum ROIC minus WACC"},
+        },
+        "required": ["market"],
+    },
+)
+async def screen_stocks(args: Dict[str, Any]) -> Dict[str, Any]:
     from screener import StockScreener
     from data_loader import DataLoader
 
@@ -75,52 +97,52 @@ def screen_stocks(
         loader = DataLoader()
         screener = StockScreener(loader)
 
-        criteria = {}
-        if gross_margin_min is not None:
-            criteria['gross_margin'] = gross_margin_min
-        if net_margin_min is not None:
-            criteria['net_margin'] = net_margin_min
-        if roe_min is not None:
-            criteria['roe'] = roe_min
-        if roa_min is not None:
-            criteria['roa'] = roa_min
-        if debt_equity_max is not None:
-            criteria['debt_to_equity'] = debt_equity_max
-        if fcf_margin_min is not None:
-            criteria['fcf_margin'] = fcf_margin_min
-        if roic_wacc_min is not None:
-            criteria['roic_wacc'] = roic_wacc_min
+        criteria: Dict[str, float] = {}
+        mapping = {
+            "gross_margin_min": "gross_margin",
+            "net_margin_min": "net_margin",
+            "roe_min": "roe",
+            "roa_min": "roa",
+            "debt_equity_max": "debt_to_equity",
+            "fcf_margin_min": "fcf_margin",
+            "roic_wacc_min": "roic_wacc",
+        }
+        for arg_key, criterion_key in mapping.items():
+            if args.get(arg_key) is not None:
+                criteria[criterion_key] = args[arg_key]
 
-        results = screener.screen(market=market, criteria=criteria)
+        results = screener.screen(market=args["market"], criteria=criteria)
 
-        return json.dumps({
+        return _ok({
             "success": True,
             "total_matches": len(results),
             "criteria_used": criteria,
-            "top_stocks": results.head(20).to_dict('records'),
-            "valuation_summary": results['Valuation'].value_counts().to_dict() if 'Valuation' in results.columns else {}
-        }, default=str)
+            "top_stocks": results.head(20).to_dict("records"),
+            "valuation_summary": results["Valuation"].value_counts().to_dict()
+            if "Valuation" in results.columns else {},
+        })
     except Exception as e:
-        return json.dumps({"success": False, "error": str(e)})
+        return _err(str(e))
 
 
-@function_tool
-def analyze_valuation(symbol: str, epv: float, market_cap: float) -> str:
-    """
-    Analyze stock valuation using EPV vs Market Cap.
-
-    Args:
-        symbol: Stock ticker symbol
-        epv: Earnings Power Value
-        market_cap: Market capitalization in millions
-
-    Returns:
-        JSON string with valuation analysis
-    """
-    from valuation import Valuator, ValuationStatus
+@tool(
+    "analyze_valuation",
+    "Analyze stock valuation using EPV vs Market Cap. Returns Undervalued/Fair/Overvalued.",
+    {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+            "epv": {"type": "number", "description": "Earnings Power Value"},
+            "market_cap": {"type": "number", "description": "Market capitalization in millions"},
+        },
+        "required": ["symbol", "epv", "market_cap"],
+    },
+)
+async def analyze_valuation(args: Dict[str, Any]) -> Dict[str, Any]:
+    from valuation import Valuator
 
     valuator = Valuator()
-    status, ratio, margin = valuator.classify(epv, market_cap)
+    status, ratio, margin = valuator.classify(args["epv"], args["market_cap"])
 
     interpretation = ""
     if status and ratio:
@@ -131,49 +153,51 @@ def analyze_valuation(symbol: str, epv: float, market_cap: float) -> str:
         elif status.value == "Overvalued":
             interpretation = f"Stock appears overvalued. EPV is only {ratio:.1%} of market cap."
 
-    return json.dumps({
-        "symbol": symbol,
-        "epv": epv,
-        "market_cap": market_cap,
+    return _ok({
+        "symbol": args["symbol"],
+        "epv": args["epv"],
+        "market_cap": args["market_cap"],
         "epv_mc_ratio": ratio,
         "valuation_status": status.value if status else "N/A",
         "margin_of_safety_pct": margin,
-        "interpretation": interpretation
-    }, default=str)
+        "interpretation": interpretation,
+    })
 
 
-@function_tool
-def detect_anomalies(symbol: str) -> str:
-    """
-    Detect financial anomalies in a company's financials using M-Score, Z-Score, F-Score.
-
-    Args:
-        symbol: Stock ticker symbol (e.g., DDI, TEX, CHCI)
-
-    Returns:
-        JSON string with anomaly detection report
-    """
+@tool(
+    "detect_anomalies",
+    "Detect financial anomalies (M-Score, Z-Score, F-Score, one-off events) for a company.",
+    {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string", "description": "Stock ticker symbol (e.g., DDI, TEX, CHCI)"},
+        },
+        "required": ["symbol"],
+    },
+)
+async def detect_anomalies(args: Dict[str, Any]) -> Dict[str, Any]:
     from anomaly_detector import AnomalyDetector
     from data_loader import DataLoader
 
     try:
         loader = DataLoader()
         detector = AnomalyDetector(loader)
-        report = detector.analyze(symbol)
+        report = detector.analyze(args["symbol"])
 
-        anomalies_summary = []
-        for a in report.anomalies[:15]:
-            anomalies_summary.append({
+        anomalies_summary = [
+            {
                 "category": a.category,
                 "severity": a.severity.value,
                 "description": a.description,
                 "year": a.year,
-                "details": a.details
-            })
+                "details": a.details,
+            }
+            for a in report.anomalies[:15]
+        ]
 
-        return json.dumps({
+        return _ok({
             "success": True,
-            "symbol": symbol,
+            "symbol": args["symbol"],
             "company_name": report.company_name,
             "risk_level": report.risk_level,
             "total_anomalies": report.total_anomalies,
@@ -182,160 +206,150 @@ def detect_anomalies(symbol: str) -> str:
                 "m_score": report.m_score,
                 "z_score": report.z_score,
                 "f_score": report.f_score,
-                "sloan_ratio": report.sloan_ratio
+                "sloan_ratio": report.sloan_ratio,
             },
-            "anomalies": anomalies_summary
-        }, default=str)
+            "anomalies": anomalies_summary,
+        })
     except Exception as e:
-        return json.dumps({"success": False, "error": str(e)})
+        return _err(str(e))
 
 
-@function_tool
-def get_stock_fundamentals(symbol: str, market: str = "US") -> str:
-    """
-    Get fundamental financial data for a specific stock.
-
-    Args:
-        symbol: Stock ticker symbol
-        market: 'US' or 'SG' market
-
-    Returns:
-        JSON string with stock fundamental data
-    """
+@tool(
+    "get_stock_fundamentals",
+    "Get fundamental financial data for a specific stock from the loaded screener data.",
+    {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+            "market": {"type": "string", "description": "'US' or 'SG'"},
+        },
+        "required": ["symbol"],
+    },
+)
+async def get_stock_fundamentals(args: Dict[str, Any]) -> Dict[str, Any]:
     from data_loader import DataLoader
 
     try:
         loader = DataLoader()
-        df = loader.load_screener_data(market)
-        stock = df[df['Symbol'] == symbol.upper()]
+        df = loader.load_screener_data(args.get("market", "US"))
+        stock = df[df["Symbol"] == args["symbol"].upper()]
 
         if len(stock) == 0:
-            return json.dumps({"success": False, "error": f"Stock {symbol} not found in {market} market"})
+            return _err(f"Stock {args['symbol']} not found in {args.get('market', 'US')} market")
 
-        return json.dumps({
-            "success": True,
-            "data": stock.iloc[0].to_dict()
-        }, default=str)
+        return _ok({"success": True, "data": stock.iloc[0].to_dict()})
     except Exception as e:
-        return json.dumps({"success": False, "error": str(e)})
+        return _err(str(e))
 
 
-@function_tool
-def compare_stocks(symbols: List[str], market: str = "US") -> str:
-    """
-    Compare multiple stocks side by side on key metrics.
-
-    Args:
-        symbols: List of stock ticker symbols to compare
-        market: 'US' or 'SG' market
-
-    Returns:
-        JSON string with comparison data
-    """
+@tool(
+    "compare_stocks",
+    "Compare multiple stocks side by side on key metrics.",
+    {
+        "type": "object",
+        "properties": {
+            "symbols": {"type": "array", "items": {"type": "string"}},
+            "market": {"type": "string", "description": "'US' or 'SG'"},
+        },
+        "required": ["symbols"],
+    },
+)
+async def compare_stocks(args: Dict[str, Any]) -> Dict[str, Any]:
     from data_loader import DataLoader
 
     try:
         loader = DataLoader()
-        df = loader.load_screener_data(market)
+        df = loader.load_screener_data(args.get("market", "US"))
 
         comparison = []
-        for symbol in symbols:
-            stock = df[df['Symbol'] == symbol.upper()]
+        for symbol in args["symbols"]:
+            stock = df[df["Symbol"] == symbol.upper()]
             if len(stock) > 0:
                 comparison.append(stock.iloc[0].to_dict())
 
-        return json.dumps({
+        return _ok({
             "success": True,
             "stocks_found": len(comparison),
-            "comparison": comparison
-        }, default=str)
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)})
-
-
-@function_tool
-def web_search(query: str, max_results: int = 5) -> str:
-    """
-    Search the web for real-time information about stocks, companies, or market news.
-
-    Args:
-        query: Search query (e.g., "AAPL latest earnings report")
-        max_results: Maximum number of results to return
-
-    Returns:
-        JSON string with search results
-    """
-    if not TAVILY_AVAILABLE:
-        return json.dumps({
-            "success": False,
-            "error": "Tavily API key not configured. Set TAVILY_API_KEY environment variable."
+            "comparison": comparison,
         })
+    except Exception as e:
+        return _err(str(e))
+
+
+@tool(
+    "web_search",
+    "Search the web for real-time information about stocks, companies, or market news (Tavily).",
+    {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "max_results": {"type": "integer", "description": "Default 5"},
+        },
+        "required": ["query"],
+    },
+)
+async def web_search(args: Dict[str, Any]) -> Dict[str, Any]:
+    if not TAVILY_AVAILABLE:
+        return _err("Tavily API key not configured. Set TAVILY_API_KEY environment variable.")
 
     try:
         client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
         response = client.search(
-            query=query,
+            query=args["query"],
             search_depth="advanced",
-            max_results=max_results,
-            include_answer=True
+            max_results=args.get("max_results", 5),
+            include_answer=True,
         )
 
-        results = []
-        for r in response.get("results", []):
-            results.append({
+        results = [
+            {
                 "title": r.get("title"),
                 "url": r.get("url"),
-                "content": r.get("content", "")[:500]
-            })
+                "content": r.get("content", "")[:500],
+            }
+            for r in response.get("results", [])
+        ]
 
-        return json.dumps({
+        return _ok({
             "success": True,
             "answer": response.get("answer", ""),
-            "results": results
-        }, default=str)
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)})
-
-
-@function_tool
-def get_realtime_price(symbol: str) -> str:
-    """
-    Get real-time stock price and quote data from Twelve Data.
-
-    Args:
-        symbol: Stock ticker symbol (e.g., "AAPL", "MSFT")
-
-    Returns:
-        JSON string with current price, change, volume
-    """
-    twelve_data_key = os.getenv("TWELVE_DATA_API_KEY")
-
-    if not twelve_data_key:
-        return json.dumps({
-            "success": False,
-            "error": "Twelve Data API key not configured. Set TWELVE_DATA_API_KEY."
+            "results": results,
         })
+    except Exception as e:
+        return _err(str(e))
 
+
+@tool(
+    "get_realtime_price",
+    "Get real-time stock price and quote data from Twelve Data.",
+    {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+        },
+        "required": ["symbol"],
+    },
+)
+async def get_realtime_price(args: Dict[str, Any]) -> Dict[str, Any]:
+    twelve_data_key = os.getenv("TWELVE_DATA_API_KEY")
+    if not twelve_data_key:
+        return _err("Twelve Data API key not configured. Set TWELVE_DATA_API_KEY.")
     if not HTTPX_AVAILABLE:
-        return json.dumps({"success": False, "error": "httpx not available"})
+        return _err("httpx not available")
 
     try:
         with httpx.Client() as client:
-            # Get quote data
             response = client.get(
                 "https://api.twelvedata.com/quote",
-                params={
-                    "symbol": symbol.upper(),
-                    "apikey": twelve_data_key
-                },
-                timeout=10.0
+                params={"symbol": args["symbol"].upper(), "apikey": twelve_data_key},
+                timeout=10.0,
             )
             data = response.json()
 
-            if "code" in data:  # Error response
-                return json.dumps({"success": False, "error": data.get("message", "Unknown error")})
+            if "code" in data:
+                return _err(data.get("message", "Unknown error"))
 
-            return json.dumps({
+            return _ok({
                 "success": True,
                 "symbol": data.get("symbol"),
                 "name": data.get("name"),
@@ -350,93 +364,94 @@ def get_realtime_price(symbol: str) -> str:
                 "previous_close": data.get("previous_close"),
                 "fifty_two_week_high": data.get("fifty_two_week", {}).get("high"),
                 "fifty_two_week_low": data.get("fifty_two_week", {}).get("low"),
-                "timestamp": data.get("datetime")
-            }, default=str)
+                "timestamp": data.get("datetime"),
+            })
     except Exception as e:
-        return json.dumps({"success": False, "error": str(e)})
+        return _err(str(e))
 
 
-@function_tool
-def get_price_history(symbol: str, interval: str = "1day", outputsize: int = 30) -> str:
-    """
-    Get historical price data for a stock.
-
-    Args:
-        symbol: Stock ticker symbol (e.g., "AAPL")
-        interval: Time interval (1min, 5min, 15min, 30min, 1h, 1day, 1week, 1month)
-        outputsize: Number of data points to return (max 5000)
-
-    Returns:
-        JSON string with historical price data
-    """
+@tool(
+    "get_price_history",
+    "Get historical price data (OHLCV) for a stock from Twelve Data.",
+    {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+            "interval": {
+                "type": "string",
+                "description": "1min, 5min, 15min, 30min, 1h, 1day, 1week, 1month",
+            },
+            "outputsize": {"type": "integer", "description": "Number of data points (max 100)"},
+        },
+        "required": ["symbol"],
+    },
+)
+async def get_price_history(args: Dict[str, Any]) -> Dict[str, Any]:
     twelve_data_key = os.getenv("TWELVE_DATA_API_KEY")
-
     if not twelve_data_key:
-        return json.dumps({
-            "success": False,
-            "error": "Twelve Data API key not configured. Set TWELVE_DATA_API_KEY."
-        })
-
+        return _err("Twelve Data API key not configured. Set TWELVE_DATA_API_KEY.")
     if not HTTPX_AVAILABLE:
-        return json.dumps({"success": False, "error": "httpx not available"})
+        return _err("httpx not available")
 
     try:
         with httpx.Client() as client:
             response = client.get(
                 "https://api.twelvedata.com/time_series",
                 params={
-                    "symbol": symbol.upper(),
-                    "interval": interval,
-                    "outputsize": min(outputsize, 100),  # Limit for free tier
-                    "apikey": twelve_data_key
+                    "symbol": args["symbol"].upper(),
+                    "interval": args.get("interval", "1day"),
+                    "outputsize": min(args.get("outputsize", 30), 100),
+                    "apikey": twelve_data_key,
                 },
-                timeout=15.0
+                timeout=15.0,
             )
             data = response.json()
 
             if "code" in data:
-                return json.dumps({"success": False, "error": data.get("message", "Unknown error")})
+                return _err(data.get("message", "Unknown error"))
 
-            # Format the time series data
             values = data.get("values", [])
-            formatted_data = []
-            for v in values[:30]:  # Limit to recent data
-                formatted_data.append({
+            formatted = [
+                {
                     "date": v.get("datetime"),
                     "open": float(v.get("open", 0)),
                     "high": float(v.get("high", 0)),
                     "low": float(v.get("low", 0)),
                     "close": float(v.get("close", 0)),
-                    "volume": int(v.get("volume", 0))
-                })
+                    "volume": int(v.get("volume", 0)),
+                }
+                for v in values[:30]
+            ]
 
-            return json.dumps({
+            return _ok({
                 "success": True,
                 "symbol": data.get("meta", {}).get("symbol"),
-                "interval": interval,
-                "data_points": len(formatted_data),
-                "prices": formatted_data
-            }, default=str)
+                "interval": args.get("interval", "1day"),
+                "data_points": len(formatted),
+                "prices": formatted,
+            })
     except Exception as e:
-        return json.dumps({"success": False, "error": str(e)})
+        return _err(str(e))
 
 
-@function_tool
-def get_market_news(topic: str = "stock market", count: int = 5) -> str:
-    """
-    Get latest market news and financial headlines.
-
-    Args:
-        topic: News topic (e.g., "stock market", "earnings", company name)
-        count: Number of news items to retrieve
-
-    Returns:
-        JSON string with news articles
-    """
+@tool(
+    "get_market_news",
+    "Get latest market news and financial headlines (NewsAPI, falls back to Tavily).",
+    {
+        "type": "object",
+        "properties": {
+            "topic": {"type": "string", "description": "News topic (e.g., 'AAPL earnings')"},
+            "count": {"type": "integer", "description": "Number of articles (default 5)"},
+        },
+        "required": ["topic"],
+    },
+)
+async def get_market_news(args: Dict[str, Any]) -> Dict[str, Any]:
     if not HTTPX_AVAILABLE:
-        return json.dumps({"success": False, "error": "httpx not available"})
+        return _err("httpx not available")
 
-    # Use free NewsAPI or fallback to web search
+    topic = args["topic"]
+    count = args.get("count", 5)
     news_api_key = os.getenv("NEWS_API_KEY")
 
     if news_api_key:
@@ -448,65 +463,89 @@ def get_market_news(topic: str = "stock market", count: int = 5) -> str:
                         "q": topic,
                         "sortBy": "publishedAt",
                         "pageSize": count,
-                        "apiKey": news_api_key
+                        "apiKey": news_api_key,
                     },
-                    timeout=10.0
+                    timeout=10.0,
                 )
                 data = response.json()
 
                 if data.get("status") == "ok":
-                    articles = []
-                    for article in data.get("articles", [])[:count]:
-                        articles.append({
-                            "title": article.get("title"),
-                            "source": article.get("source", {}).get("name"),
-                            "published": article.get("publishedAt"),
-                            "description": article.get("description"),
-                            "url": article.get("url")
-                        })
-                    return json.dumps({"success": True, "articles": articles})
-        except Exception as e:
-            pass  # Fall through to web search
+                    articles = [
+                        {
+                            "title": a.get("title"),
+                            "source": a.get("source", {}).get("name"),
+                            "published": a.get("publishedAt"),
+                            "description": a.get("description"),
+                            "url": a.get("url"),
+                        }
+                        for a in data.get("articles", [])[:count]
+                    ]
+                    return _ok({"success": True, "articles": articles})
+        except Exception:
+            pass
 
-    # Fallback to Tavily if available
     if TAVILY_AVAILABLE:
-        return web_search(f"latest news {topic}", max_results=count)
+        return await web_search({"query": f"latest news {topic}", "max_results": count})
 
-    return json.dumps({
-        "success": False,
-        "error": "No news API configured. Set NEWS_API_KEY or TAVILY_API_KEY."
-    })
+    return _err("No news API configured. Set NEWS_API_KEY or TAVILY_API_KEY.")
 
 
 # ============================================================================
-# Agent Definitions using OpenAI Agents SDK
+# MCP server packaging the tool functions
 # ============================================================================
 
-# Common tools for all agents
-COMMON_TOOLS = [
+ALL_TOOLS = [
     screen_stocks,
     analyze_valuation,
     detect_anomalies,
     get_stock_fundamentals,
     compare_stocks,
-]
-
-# Web-enabled tools
-WEB_TOOLS = [
     web_search,
-    get_market_news,
     get_realtime_price,
     get_price_history,
+    get_market_news,
+]
+
+VALUE_MCP_SERVER = create_sdk_mcp_server(
+    name="value_tools",
+    version="1.0.0",
+    tools=ALL_TOOLS,
+)
+
+# Tool name format for allowed_tools: mcp__<server_name>__<tool_name>
+TOOL_NAMES = {
+    "screen_stocks": "mcp__value_tools__screen_stocks",
+    "analyze_valuation": "mcp__value_tools__analyze_valuation",
+    "detect_anomalies": "mcp__value_tools__detect_anomalies",
+    "get_stock_fundamentals": "mcp__value_tools__get_stock_fundamentals",
+    "compare_stocks": "mcp__value_tools__compare_stocks",
+    "web_search": "mcp__value_tools__web_search",
+    "get_realtime_price": "mcp__value_tools__get_realtime_price",
+    "get_price_history": "mcp__value_tools__get_price_history",
+    "get_market_news": "mcp__value_tools__get_market_news",
+}
+
+COMMON_TOOL_NAMES = [
+    TOOL_NAMES["screen_stocks"],
+    TOOL_NAMES["analyze_valuation"],
+    TOOL_NAMES["detect_anomalies"],
+    TOOL_NAMES["get_stock_fundamentals"],
+    TOOL_NAMES["compare_stocks"],
+]
+
+WEB_TOOL_NAMES = [
+    TOOL_NAMES["web_search"],
+    TOOL_NAMES["get_market_news"],
+    TOOL_NAMES["get_realtime_price"],
+    TOOL_NAMES["get_price_history"],
 ]
 
 
-def create_screening_agent() -> Agent:
-    """Create the stock screening specialist agent."""
-    return Agent(
-        name="ScreeningAgent",
-        instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
+# ============================================================================
+# Subagent definitions and system prompts
+# ============================================================================
 
-You are a stock screening specialist. Your job is to help investors find stocks that match their criteria.
+SCREENING_SYSTEM_PROMPT = """You are a stock screening specialist. Your job is to help investors find stocks that match their criteria.
 
 When screening stocks:
 1. Ask clarifying questions about criteria if needed
@@ -522,20 +561,9 @@ Default reasonable criteria for value stocks:
 - ROIC > WACC (positive spread)
 
 Use the screen_stocks tool to filter stocks. Use compare_stocks to compare top picks.
-If the user needs anomaly detection, hand off to the AnomalyAgent.
-If the user needs investment research, hand off to the ResearchAgent.
-""",
-        tools=COMMON_TOOLS,
-    )
+"""
 
-
-def create_anomaly_agent() -> Agent:
-    """Create the forensic accounting/anomaly detection agent."""
-    return Agent(
-        name="AnomalyAgent",
-        instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
-
-You are a forensic accounting and anomaly detection specialist. Your job is to analyze companies for financial red flags.
+ANOMALY_SYSTEM_PROMPT = """You are a forensic accounting and anomaly detection specialist. Your job is to analyze companies for financial red flags.
 
 When analyzing:
 1. Explain what each quality metric means (M-Score, Z-Score, F-Score, Sloan Ratio)
@@ -553,20 +581,9 @@ Key thresholds to remember:
 - Sloan Ratio > 10%: Earnings quality concerns (high accruals)
 
 Use detect_anomalies tool for detailed analysis. Always explain findings in plain language.
-If user needs stock screening, hand off to the ScreeningAgent.
-If user needs investment thesis, hand off to the ResearchAgent.
-""",
-        tools=COMMON_TOOLS,
-    )
+"""
 
-
-def create_research_agent() -> Agent:
-    """Create the investment research agent with web access."""
-    return Agent(
-        name="ResearchAgent",
-        instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
-
-You are an investment research analyst. Your job is to provide in-depth analysis and investment thesis for stocks.
+RESEARCH_SYSTEM_PROMPT = """You are an investment research analyst. Your job is to provide in-depth analysis and investment thesis for stocks.
 
 When analyzing:
 1. Evaluate both bull and bear cases objectively
@@ -583,73 +600,59 @@ Focus on value investing principles:
 
 Use web_search and get_market_news for real-time information.
 Use get_stock_fundamentals for financial data.
-If detailed screening needed, hand off to ScreeningAgent.
-If anomaly analysis needed, hand off to AnomalyAgent.
-""",
-        tools=COMMON_TOOLS + WEB_TOOLS,
-    )
+"""
 
+COORDINATOR_SYSTEM_PROMPT = """You are the Value Investment AI Coordinator. You help investors screen stocks, analyze valuations, and detect financial anomalies.
 
-def create_coordinator_agent() -> Agent:
-    """Create the main coordinator agent that manages handoffs."""
-
-    # Create sub-agents
-    screening_agent = create_screening_agent()
-    anomaly_agent = create_anomaly_agent()
-    research_agent = create_research_agent()
-
-    # Create handoffs
-    handoff_to_screening = handoff(
-        agent=screening_agent,
-        tool_name_override="transfer_to_screening_agent",
-        tool_description_override="Transfer to the Screening Agent for stock filtering and screening tasks."
-    )
-
-    handoff_to_anomaly = handoff(
-        agent=anomaly_agent,
-        tool_name_override="transfer_to_anomaly_agent",
-        tool_description_override="Transfer to the Anomaly Agent for forensic analysis and red flag detection."
-    )
-
-    handoff_to_research = handoff(
-        agent=research_agent,
-        tool_name_override="transfer_to_research_agent",
-        tool_description_override="Transfer to the Research Agent for investment thesis and real-time market data."
-    )
-
-    return Agent(
-        name="ValueInvestmentCoordinator",
-        instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
-
-You are the Value Investment AI Coordinator. You help investors screen stocks, analyze valuations, and detect financial anomalies.
-
-You coordinate a team of specialized agents:
-1. **ScreeningAgent**: Expert at filtering stocks based on fundamental criteria
-2. **AnomalyAgent**: Expert at detecting financial red flags and forensic analysis
-3. **ResearchAgent**: Expert at investment research with real-time web data
+You coordinate a team of specialized agents available via the Task tool:
+1. **screening**: Expert at filtering stocks based on fundamental criteria
+2. **anomaly**: Expert at detecting financial red flags and forensic analysis
+3. **research**: Expert at investment research with real-time web data
 
 Route requests appropriately:
-- Stock screening, filtering, comparisons → ScreeningAgent
-- M-Score, Z-Score, anomaly detection, red flags → AnomalyAgent
-- Investment thesis, news, real-time data, buy/sell recommendations → ResearchAgent
+- Stock screening, filtering, comparisons → delegate to 'screening' subagent
+- M-Score, Z-Score, anomaly detection, red flags → delegate to 'anomaly' subagent
+- Investment thesis, news, real-time data, buy/sell recommendations → delegate to 'research' subagent
 
 For simple queries, you can answer directly using your tools.
-For complex tasks, delegate to the appropriate specialist.
+For complex tasks, delegate to the appropriate specialist via Task.
 
 Always be data-driven and cite specific metrics when making recommendations.
 Focus on value investing principles: margin of safety, earnings power, and financial strength.
-""",
-        tools=COMMON_TOOLS + [handoff_to_screening, handoff_to_anomaly, handoff_to_research],
-    )
+"""
+
+
+def _subagent_definitions() -> Dict[str, AgentDefinition]:
+    """Define screening/anomaly/research subagents for the coordinator."""
+    return {
+        "screening": AgentDefinition(
+            description="Stock screening specialist for filtering by fundamental criteria",
+            prompt=SCREENING_SYSTEM_PROMPT,
+            tools=COMMON_TOOL_NAMES,
+            model="sonnet",
+        ),
+        "anomaly": AgentDefinition(
+            description="Forensic anomaly detection specialist for financial red flags",
+            prompt=ANOMALY_SYSTEM_PROMPT,
+            tools=COMMON_TOOL_NAMES,
+            model="sonnet",
+        ),
+        "research": AgentDefinition(
+            description="Investment research analyst with real-time web access",
+            prompt=RESEARCH_SYSTEM_PROMPT,
+            tools=COMMON_TOOL_NAMES + WEB_TOOL_NAMES,
+            model="sonnet",
+        ),
+    }
 
 
 # ============================================================================
-# Agent Response Wrapper for Compatibility
+# Agent Response Wrapper for backward compatibility with app.py
 # ============================================================================
 
 @dataclass
 class AgentResponse:
-    """Response from an agent - compatible with existing code."""
+    """Response from an agent."""
     content: str
     tool_calls: List[Dict] = field(default_factory=list)
     raw_response: Any = None
@@ -658,98 +661,112 @@ class AgentResponse:
 class ValueInvestmentAgent:
     """
     Wrapper class for the Value Investment Agent system.
-    Provides backward-compatible interface while using Agents SDK.
+    Backward-compatible interface; uses Claude Agent SDK underneath.
     """
 
-    def __init__(self, agent_type: str = "coordinator"):
+    def __init__(self, agent_type: str = "coordinator", model: str = DEFAULT_MODEL):
         """
-        Initialize the agent.
-
         Args:
-            agent_type: Type of agent ('coordinator', 'screening', 'anomaly', 'research')
+            agent_type: 'coordinator', 'screening', 'anomaly', or 'research'
+            model: Claude model ID. Default is claude-sonnet-4-6.
         """
         self.agent_type = agent_type
+        self.model = model
+        self.conversation_history: List[Dict[str, str]] = []
+        self._options = self._build_options()
 
-        if agent_type == "coordinator":
-            self.agent = create_coordinator_agent()
-        elif agent_type == "screening":
-            self.agent = create_screening_agent()
-        elif agent_type == "anomaly":
-            self.agent = create_anomaly_agent()
-        elif agent_type == "research":
-            self.agent = create_research_agent()
-        else:
-            self.agent = create_coordinator_agent()
-
-        self.conversation_history = []
-
-    def chat(self, user_message: str) -> AgentResponse:
-        """
-        Chat with the agent synchronously.
-
-        Args:
-            user_message: User's message/question
-
-        Returns:
-            AgentResponse with the agent's response
-        """
-        # Run async in sync context
-        return asyncio.get_event_loop().run_until_complete(
-            self.chat_async(user_message)
+    def _build_options(self) -> ClaudeAgentOptions:
+        if self.agent_type == "coordinator":
+            return ClaudeAgentOptions(
+                system_prompt=COORDINATOR_SYSTEM_PROMPT,
+                model=self.model,
+                mcp_servers={"value_tools": VALUE_MCP_SERVER},
+                agents=_subagent_definitions(),
+                allowed_tools=COMMON_TOOL_NAMES + WEB_TOOL_NAMES + ["Task"],
+                permission_mode="bypassPermissions",
+            )
+        if self.agent_type == "screening":
+            return ClaudeAgentOptions(
+                system_prompt=SCREENING_SYSTEM_PROMPT,
+                model=self.model,
+                mcp_servers={"value_tools": VALUE_MCP_SERVER},
+                allowed_tools=COMMON_TOOL_NAMES,
+                permission_mode="bypassPermissions",
+            )
+        if self.agent_type == "anomaly":
+            return ClaudeAgentOptions(
+                system_prompt=ANOMALY_SYSTEM_PROMPT,
+                model=self.model,
+                mcp_servers={"value_tools": VALUE_MCP_SERVER},
+                allowed_tools=COMMON_TOOL_NAMES,
+                permission_mode="bypassPermissions",
+            )
+        if self.agent_type == "research":
+            return ClaudeAgentOptions(
+                system_prompt=RESEARCH_SYSTEM_PROMPT,
+                model=self.model,
+                mcp_servers={"value_tools": VALUE_MCP_SERVER},
+                allowed_tools=COMMON_TOOL_NAMES + WEB_TOOL_NAMES,
+                permission_mode="bypassPermissions",
+            )
+        # Fallback
+        return ClaudeAgentOptions(
+            system_prompt=COORDINATOR_SYSTEM_PROMPT,
+            model=self.model,
+            mcp_servers={"value_tools": VALUE_MCP_SERVER},
+            agents=_subagent_definitions(),
+            allowed_tools=COMMON_TOOL_NAMES + WEB_TOOL_NAMES + ["Task"],
+            permission_mode="bypassPermissions",
         )
 
+    def chat(self, user_message: str) -> AgentResponse:
+        """Sync wrapper around chat_async."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We're inside an existing event loop (e.g., Streamlit nested) — run in a task.
+                import nest_asyncio
+                nest_asyncio.apply()
+                return loop.run_until_complete(self.chat_async(user_message))
+            return loop.run_until_complete(self.chat_async(user_message))
+        except RuntimeError:
+            return asyncio.run(self.chat_async(user_message))
+
     async def chat_async(self, user_message: str) -> AgentResponse:
-        """
-        Chat with the agent asynchronously.
+        """Send a message and collect the assistant response."""
+        self.conversation_history.append({"role": "user", "content": user_message})
 
-        Args:
-            user_message: User's message/question
-
-        Returns:
-            AgentResponse with the agent's response
-        """
-        # Add to conversation history
-        self.conversation_history.append({
-            "role": "user",
-            "content": user_message
-        })
+        text_chunks: List[str] = []
+        tool_calls: List[Dict[str, Any]] = []
+        last_msg = None
 
         try:
-            # Run the agent
-            result = await Runner.run(
-                self.agent,
-                input=user_message,
-            )
+            async with ClaudeSDKClient(options=self._options) as client:
+                await client.query(user_message)
+                async for msg in client.receive_response():
+                    last_msg = msg
+                    if isinstance(msg, AssistantMessage):
+                        for block in msg.content:
+                            if isinstance(block, TextBlock):
+                                text_chunks.append(block.text)
+                            elif isinstance(block, ToolUseBlock):
+                                tool_calls.append({
+                                    "tool": block.name,
+                                    "input": block.input,
+                                })
+                    elif isinstance(msg, ResultMessage):
+                        break
 
-            # Extract tool calls from the run
-            tool_calls = []
-            if hasattr(result, 'new_items'):
-                for item in result.new_items:
-                    if hasattr(item, 'raw_item') and hasattr(item.raw_item, 'type'):
-                        if item.raw_item.type == 'function_call':
-                            tool_calls.append({
-                                "tool": item.raw_item.name if hasattr(item.raw_item, 'name') else "unknown",
-                                "arguments": item.raw_item.arguments if hasattr(item.raw_item, 'arguments') else {}
-                            })
-
-            # Get the final output
-            final_output = result.final_output if hasattr(result, 'final_output') else str(result)
-
-            # Add to history
-            self.conversation_history.append({
-                "role": "assistant",
-                "content": final_output
-            })
+            final_text = "".join(text_chunks).strip() or "(no response)"
+            self.conversation_history.append({"role": "assistant", "content": final_text})
 
             return AgentResponse(
-                content=final_output,
+                content=final_text,
                 tool_calls=tool_calls,
-                raw_response=result
+                raw_response=last_msg,
             )
-
         except Exception as e:
-            error_msg = f"Agent error: {str(e)}"
-            return AgentResponse(content=error_msg)
+            return AgentResponse(content=f"Agent error: {str(e)}")
 
     def reset_conversation(self):
         """Reset conversation history."""
@@ -780,29 +797,12 @@ class ResearchAgent(ValueInvestmentAgent):
 # ============================================================================
 
 def get_agent(agent_type: str = "coordinator") -> ValueInvestmentAgent:
-    """
-    Get an agent instance.
-
-    Args:
-        agent_type: Type of agent ('coordinator', 'screening', 'anomaly', 'research')
-
-    Returns:
-        ValueInvestmentAgent instance
-    """
+    """Get an agent instance by type."""
     return ValueInvestmentAgent(agent_type=agent_type)
 
 
 async def quick_screen_async(market: str, **criteria) -> str:
-    """
-    Quick screening with AI analysis (async).
-
-    Args:
-        market: 'US' or 'SG'
-        **criteria: Screening criteria
-
-    Returns:
-        AI analysis of screening results
-    """
+    """Quick screening with AI analysis (async)."""
     agent = ScreeningAgent()
     criteria_str = ", ".join(f"{k}={v}" for k, v in criteria.items())
     prompt = f"Screen {market} stocks with these criteria: {criteria_str}. Analyze the results and recommend top picks."
@@ -812,21 +812,11 @@ async def quick_screen_async(market: str, **criteria) -> str:
 
 def quick_screen(market: str, **criteria) -> str:
     """Quick screening with AI analysis (sync wrapper)."""
-    return asyncio.get_event_loop().run_until_complete(
-        quick_screen_async(market, **criteria)
-    )
+    return asyncio.run(quick_screen_async(market, **criteria))
 
 
 async def quick_analyze_async(symbol: str) -> str:
-    """
-    Quick anomaly analysis with AI interpretation (async).
-
-    Args:
-        symbol: Stock ticker symbol
-
-    Returns:
-        AI analysis of anomalies
-    """
+    """Quick anomaly analysis with AI interpretation (async)."""
     agent = AnomalyAgent()
     prompt = f"Analyze {symbol} for financial anomalies and red flags. Provide a detailed risk assessment."
     response = await agent.chat_async(prompt)
@@ -835,18 +825,12 @@ async def quick_analyze_async(symbol: str) -> str:
 
 def quick_analyze(symbol: str) -> str:
     """Quick anomaly analysis (sync wrapper)."""
-    return asyncio.get_event_loop().run_until_complete(
-        quick_analyze_async(symbol)
-    )
+    return asyncio.run(quick_analyze_async(symbol))
 
-
-# ============================================================================
-# Sequential Agent Flow
-# ============================================================================
 
 async def run_full_analysis(symbol: str, market: str = "US") -> Dict[str, Any]:
     """
-    Run a full sequential analysis: Screen → Anomaly → Research.
+    Run a full sequential analysis: Screening fundamentals → Anomaly → Research thesis.
 
     Args:
         symbol: Stock ticker symbol
@@ -855,58 +839,50 @@ async def run_full_analysis(symbol: str, market: str = "US") -> Dict[str, Any]:
     Returns:
         Dictionary with results from all agents
     """
-    results = {}
+    results: Dict[str, Any] = {}
 
-    # Step 1: Get fundamentals with screening agent
     screening_agent = ScreeningAgent()
-    fundamentals_response = await screening_agent.chat_async(
+    fundamentals = await screening_agent.chat_async(
         f"Get the fundamentals for {symbol} in the {market} market and evaluate its valuation."
     )
-    results["fundamentals"] = fundamentals_response.content
+    results["fundamentals"] = fundamentals.content
 
-    # Step 2: Run anomaly detection
     anomaly_agent = AnomalyAgent()
-    anomaly_response = await anomaly_agent.chat_async(
+    anomaly = await anomaly_agent.chat_async(
         f"Analyze {symbol} for any financial red flags or anomalies. Explain the risk level."
     )
-    results["anomalies"] = anomaly_response.content
+    results["anomalies"] = anomaly.content
 
-    # Step 3: Generate investment thesis with research agent
     research_agent = ResearchAgent()
-    research_response = await research_agent.chat_async(
+    research = await research_agent.chat_async(
         f"""Based on this analysis for {symbol}:
 
-Fundamentals: {fundamentals_response.content[:500]}
-Anomalies: {anomaly_response.content[:500]}
+Fundamentals: {fundamentals.content[:500]}
+Anomalies: {anomaly.content[:500]}
 
 Search for recent news about {symbol} and provide a complete investment thesis with recommendation."""
     )
-    results["thesis"] = research_response.content
+    results["thesis"] = research.content
 
     return results
 
 
 # ============================================================================
-# Main / Demo
+# Demo / Smoke Test
 # ============================================================================
 
 if __name__ == "__main__":
-    import asyncio
-
     async def demo():
         print("=" * 60)
-        print("Value Investment AI Agent Demo (OpenAI Agents SDK)")
+        print("Value Investment AI Agent Demo (Claude Agent SDK)")
         print("=" * 60)
 
-        # Test with coordinator agent
         agent = ValueInvestmentAgent()
 
-        # Test screening
         print("\n[Test 1: Stock Screening]")
         response = await agent.chat_async("Screen US stocks with ROE > 15% and gross margin > 30%")
         print(f"Response: {response.content[:500]}...")
 
-        # Test anomaly detection
         print("\n[Test 2: Anomaly Detection]")
         agent.reset_conversation()
         response = await agent.chat_async("Analyze DDI for any financial anomalies")

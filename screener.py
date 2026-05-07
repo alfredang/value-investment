@@ -86,47 +86,64 @@ class StockScreener:
 
                 df = df[mask]
 
-        # Add valuation classification if requested
-        if include_valuation and 'Earnings Power Value (EPV)' in df.columns:
+        # Add valuation classification using the in-house formula
+        if include_valuation:
             df = self._add_valuation(df)
 
         return df
 
     def _add_valuation(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Add valuation classification based on EPV vs Market Cap.
+        Add valuation columns using the client's in-house two-stage DCF formula.
 
-        Classification:
-        - Undervalued: EPV/MC > 1.3
-        - Fair Value: 0.7 <= EPV/MC <= 1.3
-        - Overvalued: EPV/MC < 0.7
+        Adds:
+        - Low IV       (conservative intrinsic value per share)
+        - High IV      (aggressive intrinsic value per share)
+        - Valuation    (Undervalued / Fair Value / Overvalued / N/A)
+
+        Verdict logic:
+        - Undervalued: Current Price < Low IV  (cheap by both scenarios)
+        - Fair Value : Low IV ≤ Current Price ≤ High IV
+        - Overvalued : Current Price > High IV (expensive by both scenarios)
         """
+        from valuation import (
+            compute_in_house_valuation,
+            derive_eps_inputs_from_csv_row,
+            classify_verdict,
+            ValuationStatus,
+        )
+
         df = df.copy()
+        low_ivs, high_ivs, verdicts = [], [], []
 
-        # Calculate EPV to Market Cap ratio
-        epv = df['Earnings Power Value (EPV)']
-        market_cap = df['Market Cap ($M)']
+        for _, row in df.iterrows():
+            inputs = derive_eps_inputs_from_csv_row(row)
+            if inputs is None:
+                low_ivs.append(None)
+                high_ivs.append(None)
+                verdicts.append(ValuationStatus.NA.value)
+                continue
 
-        # Handle edge cases - replace inf with NaN
-        epv_mc_ratio = epv / market_cap
-        epv_mc_ratio = epv_mc_ratio.replace([float('inf'), float('-inf')], pd.NA)
+            present_eps, past_eps, years_back = inputs
+            iv = compute_in_house_valuation(present_eps, past_eps, years_back=years_back)
+            if iv is None:
+                low_ivs.append(None)
+                high_ivs.append(None)
+                verdicts.append(ValuationStatus.NA.value)
+                continue
 
-        df['EPV/MC Ratio'] = epv_mc_ratio
+            low_ivs.append(iv["low_iv"])
+            high_ivs.append(iv["high_iv"])
 
-        # Classify valuation
-        def classify(ratio):
-            if pd.isna(ratio) or ratio is None:
-                return 'N/A'
-            if ratio <= 0:
-                return 'N/A (Negative EPV)'
-            if ratio > 1.3:
-                return 'Undervalued'
-            if ratio >= 0.7:
-                return 'Fair Value'
-            return 'Overvalued'
+            try:
+                cp = float(row.get("Current Price")) if row.get("Current Price") is not None else None
+            except (TypeError, ValueError):
+                cp = None
+            verdicts.append(classify_verdict(cp, iv["low_iv"], iv["high_iv"]).value)
 
-        df['Valuation'] = epv_mc_ratio.apply(classify)
-
+        df["Low IV"] = low_ivs
+        df["High IV"] = high_ivs
+        df["Valuation"] = verdicts
         return df
 
     def get_available_criteria(self) -> Dict[str, str]:
