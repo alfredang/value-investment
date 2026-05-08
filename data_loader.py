@@ -16,9 +16,12 @@ class DataLoader:
         Initialize the data loader.
 
         Args:
-            data_dir: Directory containing data files. Defaults to current directory.
+            data_dir: Directory containing data files. Defaults to ./data
+                relative to this file.
         """
-        self.data_dir = data_dir or os.path.dirname(os.path.abspath(__file__))
+        self.data_dir = data_dir or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "data"
+        )
 
     def load_screener_data(self, market: str = "US") -> pd.DataFrame:
         """

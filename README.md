@@ -78,7 +78,7 @@ Multi-agent system with subagent dispatch and specialized roles:
 ### Prerequisites
 - **Python 3.10+**
 - **Node.js** (for Claude Code CLI)
-- **Claude Code CLI** logged in via `claude /login` (uses your Claude subscription — no API key needed)
+- **Claude Code CLI** logged in via `claude /login`, plus a subscription token from `claude setup-token`
 
 ### Using pip
 
@@ -90,24 +90,24 @@ pip install -r requirements.txt
 # One-time Claude Code CLI auth (if not already set up)
 npm install -g @anthropic-ai/claude-code
 claude /login
+claude setup-token   # generates the subscription OAuth token used by the app
 
 streamlit run app.py
 ```
 
+Paste the token from `claude setup-token` into the auth panel at the top of the app, or set `CLAUDE_CODE_OAUTH_TOKEN` in your environment before launching.
+
 ### Using Docker
 
 ```bash
-docker pull tertiaryinfotech/value-investment:latest
-
+docker build -t value-investment .
 docker run -p 8501:8501 \
-  -e ANTHROPIC_API_KEY=your-key \
+  -e CLAUDE_CODE_OAUTH_TOKEN=your-subscription-token \
   -e FMP_API_KEY=your-key \
-  tertiaryinfotech/value-investment:latest
+  value-investment
 ```
 
-Then open http://localhost:8501 in your browser.
-
-> **Note:** Docker deployment uses the API key path since Claude Code CLI is not bundled in the container. For local use without an API key, install Claude Code CLI on your host and run with pip instead.
+Then open http://localhost:8501 in your browser. The bundled CSV/XLS sample data ships inside the image (re-included via `.dockerignore`), so the app works out of the box.
 
 ### Command Line Interface
 
@@ -135,18 +135,14 @@ Step 1: Companies Screening     Step 2: AI Anomaly Analysis     Step 3: Summary 
 
 ### Authentication
 
-This app uses **`claude-agent-sdk`** which authenticates two ways:
+This app uses **`claude-agent-sdk`** authenticated exclusively via your **Claude Code subscription** — no Anthropic API key path is supported.
 
-1. **Claude Code CLI subscription (recommended, free with Claude Pro/Max)**
-   - Run `claude /login` once
-   - No `.env` setup needed for AI calls
-
-2. **Anthropic API key (optional, paid)**
-   - Get key from [console.anthropic.com](https://console.anthropic.com)
-   - Either paste it into the app's UI input field, OR set in `.env`:
-   ```bash
-   ANTHROPIC_API_KEY=sk-ant-your-api-key-here
-   ```
+1. Run `claude /login` once to set up the local Claude Code CLI session.
+2. Run `claude setup-token` to generate a subscription OAuth token.
+3. Either:
+   - paste the token into the auth expander at the top of the Streamlit app, or
+   - export it as `CLAUDE_CODE_OAUTH_TOKEN` before launching, or
+   - leave it blank to use the local `claude /login` session directly.
 
 ### Optional Environment Variables
 
@@ -173,16 +169,16 @@ value-investment/
 ├── chart_engine.py         # Matplotlib (DOCX) + Plotly (Streamlit) chart factories
 ├── llm.py                  # claude-agent-sdk wrapper (one-shot completions, retry logic)
 ├── ai_agents.py            # Claude Agent SDK multi-agent system
-├── ai_analyzer.py          # High-level AI analysis helpers
 ├── enhanced_report.py      # AI-enhanced DOCX report generator (standardized template)
+├── enhanced_analysis.py    # Extended analysis utilities used by the app
 ├── anomaly_detector.py     # Rule-based financial anomaly detection
 ├── data_loader.py          # CSV/XLS file parsing
 ├── fmp_api.py              # Financial Modeling Prep API client
-├── market_data.py          # Real-time price/news integrations
 ├── summary_report.py       # Professional Step 3 dashboard (Plotly + HTML/CSS)
 ├── report_generator.py     # Markdown/Word report generation
 ├── admin.py                # API key management + LLM config UI
 ├── main.py                 # CLI interface
+├── data/                   # Bundled CSV/XLS screener + anomaly inputs
 ├── requirements.txt        # pip dependencies
 └── .env.example            # Environment variables template
 ```
@@ -212,7 +208,7 @@ CLI:
 2. Go to [share.streamlit.io](https://share.streamlit.io)
 3. Click "New app" and select your fork
 4. Add secrets in app settings:
-   - `ANTHROPIC_API_KEY` (required for cloud — Claude Code CLI is not available in Streamlit Cloud)
+   - `CLAUDE_CODE_OAUTH_TOKEN` (required — generate locally with `claude setup-token`)
    - `FMP_API_KEY` (optional, for company profiles)
    - `TAVILY_API_KEY` (optional, for web search)
    - `NEWS_API_KEY` (optional, for news)
@@ -222,7 +218,3 @@ CLI:
 ## License
 
 MIT License
-
-## Legacy Documentation
-
-The previous version of this README (describing the OpenAI-based architecture before the Claude Agent SDK migration) is preserved at [`README_LEGACY.md`](./README_LEGACY.md) for historical reference.

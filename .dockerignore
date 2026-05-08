@@ -20,6 +20,9 @@ venv/
 *.xls
 *.xlsx
 *.csv
+!data/*.xls
+!data/*.xlsx
+!data/*.csv
 *.egg-info
 dist/
 build/
