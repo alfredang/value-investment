@@ -84,6 +84,10 @@ st.set_page_config(
 # Custom CSS - Professional Dark Theme
 st.markdown("""
 <style>
+    /* Reduce Streamlit's default top padding so the title sits closer to the header */
+    .block-container { padding-top: 1.5rem !important; }
+    header[data-testid="stHeader"] { height: 2rem; }
+
     :root {
         --primary: #1a1a2e;
         --secondary: #16213e;
