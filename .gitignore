@@ -67,3 +67,10 @@ results/
 *.xls
 *.xlsx
 *.csv
+
+# Personal tokens / secrets — NEVER commit
+MY_TOKENS_*.txt
+PERSONAL_*.txt
+*_DO_NOT_COMMIT.*
+secrets.txt
+tokens.txt

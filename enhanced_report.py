@@ -501,17 +501,131 @@ def fmt_money(val):
     return f"${val}M" if val is not None else "N/A"
 
 
-def _fetch_ten_year_via_claude(symbol: str, company: str) -> Optional[Dict[str, list]]:
-    """
-    Use Claude (knowledge-based, fast — no WebSearch) to provide best-effort
-    10-year annual financials. Returns a dict for the chart engine, or None
-    if Claude couldn't produce usable data.
-
-    Trade-off: ~8 sec per company (fast for demo) vs WebSearch (~2-3 min per
-    company but with verifiable sources). Caption flags this clearly.
-    """
+def _parse_chart_json(raw: str) -> Optional[Dict[str, list]]:
+    """Parse a JSON blob with {symbol, years: [{year, revenue_m, net_income_m, fcf_m}]}
+    into the chart engine's series dict format. Returns None if invalid."""
     import json
     import re
+
+    if not raw:
+        return None
+    cleaned = raw.strip()
+    # Strip code fences if Claude wrapped the JSON despite instructions
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"```\s*$", "", cleaned).strip()
+    # Defensive: find outermost JSON object
+    first = cleaned.find("{")
+    last = cleaned.rfind("}")
+    if first == -1 or last == -1 or last <= first:
+        return None
+    cleaned = cleaned[first:last + 1]
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None
+
+    years = data.get("years") or []
+    if not years:
+        return None
+
+    rev_pts, ni_pts, fcf_pts = [], [], []
+    for entry in years:
+        y = str(entry.get("year", "")).strip()
+        if not y:
+            continue
+        for arr, key in [(rev_pts, "revenue_m"), (ni_pts, "net_income_m"), (fcf_pts, "fcf_m")]:
+            v = entry.get(key)
+            if v is not None:
+                try:
+                    arr.append((y, float(v)))
+                except (TypeError, ValueError):
+                    pass
+
+    series: Dict[str, list] = {}
+    if rev_pts:
+        series["Revenue ($M)"] = rev_pts
+    if ni_pts:
+        series["Net Income ($M)"] = ni_pts
+    if fcf_pts:
+        series["Free Cash Flow ($M)"] = fcf_pts
+    return series or None
+
+
+def _fetch_ten_year_via_firecrawl(
+    symbol: str, company: str, market: str = "US"
+) -> Optional[Dict[str, list]]:
+    """
+    Scrape REAL 10-year financials via Firecrawl (stockanalysis.com), then
+    have Claude extract the numbers from the scraped tables — NOT from
+    Claude's training memory.
+
+    Returns chart-engine series dict, or None if Firecrawl failed.
+    """
+    from llm import claude_complete
+    try:
+        from scraper import scrape_financial_data, is_firecrawl_available
+    except ImportError:
+        return None
+
+    if not is_firecrawl_available():
+        return None
+
+    scraped = scrape_financial_data(symbol, company or symbol, market)
+    if not scraped.get("ok"):
+        return None
+
+    md = scraped.get("markdown", "")
+    if not md:
+        return None
+
+    # Cap to ~25k chars to keep prompts light — financial tables are usually
+    # near the top of these pages anyway.
+    md_for_prompt = md[:25000]
+
+    system = (
+        "You are a strict data-extraction tool. Read the provided real financial "
+        "data scraped from public filings and return JSON ONLY — no preamble, no "
+        "commentary, no markdown code fences. Use null for any year you cannot "
+        "find. Convert local currency to USD millions when obvious; otherwise "
+        "keep the source currency and note it."
+    )
+    user = f"""From the SCRAPED financial data below, extract annual Revenue, Net Income, and Free Cash Flow for the past 5-10 fiscal years for {company} ({symbol}).
+
+DATA SOURCE (REAL, scraped via Firecrawl):
+{md_for_prompt}
+
+Return ONLY this exact JSON shape (no other text, no fences):
+
+{{
+  "symbol": "{symbol}",
+  "currency": "USD or BRL or whatever the source uses — match the table",
+  "years": [
+    {{"year": "2020", "revenue_m": 1201, "net_income_m": 308, "fcf_m": 234}},
+    {{"year": "2021", "revenue_m": 1753, "net_income_m": 440, "fcf_m": 461}}
+  ]
+}}
+
+Rules:
+- Order years OLDEST first
+- Use null for any number you cannot find in the scraped data
+- Don't invent numbers — only use what's explicitly in the data
+- If FCF isn't listed, derive it as Operating Cash Flow minus CapEx if both are present, otherwise null"""
+
+    try:
+        raw = claude_complete(user=user, system=system)
+    except Exception:
+        return None
+
+    return _parse_chart_json(raw)
+
+
+def _fetch_ten_year_via_claude(symbol: str, company: str) -> Optional[Dict[str, list]]:
+    """
+    LAST-RESORT fallback when Firecrawl fails: ask Claude to estimate from
+    its training memory. Output is approximate and the caption flags this
+    clearly.
+    """
     from llm import claude_complete
 
     system = (
@@ -536,62 +650,14 @@ Return ONLY this exact JSON shape, no other text:
   ]
 }}
 
-Order years oldest first. Use null for any field you cannot estimate. If you do not know this company at all, return {{"symbol": "{symbol}", "years": []}}.
+Order years oldest first. Use null for any field you cannot estimate.
 Output ONLY the JSON."""
 
     try:
         raw = claude_complete(user=user, system=system)
     except Exception:
         return None
-
-    if not raw:
-        return None
-
-    # Strip code fences if Claude wrapped the JSON despite our instructions
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-        cleaned = re.sub(r"```\s*$", "", cleaned).strip()
-
-    # Find first { and last } — defensive against any leading/trailing prose
-    first = cleaned.find("{")
-    last = cleaned.rfind("}")
-    if first == -1 or last == -1 or last <= first:
-        return None
-    cleaned = cleaned[first:last + 1]
-
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        return None
-
-    years = data.get("years") or []
-    if not years:
-        return None
-
-    rev_pts, ni_pts, fcf_pts = [], [], []
-    for entry in years:
-        y = str(entry.get("year", "")).strip()
-        if not y:
-            continue
-        rev = entry.get("revenue_m")
-        ni = entry.get("net_income_m")
-        fcf = entry.get("fcf_m")
-        if rev is not None:
-            rev_pts.append((y, float(rev)))
-        if ni is not None:
-            ni_pts.append((y, float(ni)))
-        if fcf is not None:
-            fcf_pts.append((y, float(fcf)))
-
-    series = {}
-    if rev_pts:
-        series["Revenue ($M)"] = rev_pts
-    if ni_pts:
-        series["Net Income ($M)"] = ni_pts
-    if fcf_pts:
-        series["Free Cash Flow ($M)"] = fcf_pts
-    return series or None
+    return _parse_chart_json(raw)
 
 
 def _synthesize_history_from_csv_row(company_data: Dict) -> Optional[Dict[str, list]]:
@@ -672,29 +738,53 @@ def _embed_ten_year_chart(doc, symbol: str, company: str = "", company_data: Opt
     Embed a 5-10 year line chart in the DOCX.
 
     Strategy (waterfall):
-      1. Try Claude knowledge-based fetch (real numbers if Claude knows the company).
-      2. Fall back to CSV-based synthesis (model-extrapolated from current
-         metrics + 5-year growth rates — works for any ticker in the CSV).
-      3. If both fail, return False so caller can print a fallback message.
+      1. PREFERRED: Firecrawl scrapes real filings from stockanalysis.com,
+         then Claude extracts the numbers from those real tables.
+      2. CSV-based synthesis (math-derived extrapolation from screening metrics).
+      3. LAST RESORT: Claude estimates from training memory (clearly flagged).
+      4. If all three fail, return False so caller prints a placeholder message.
     """
     try:
         from chart_engine import make_ten_year_line_chart_png
 
-        # Step 1: Claude
-        series = _fetch_ten_year_via_claude(symbol, company or symbol)
-        source_label = (
-            f"Source: Claude AI estimates from training data — best-effort figures for {symbol}. "
-            "Verify against 10-K / primary filings before any investment decision."
-        )
+        # Determine market for Firecrawl URL routing
+        market = "US"
+        if company_data:
+            ex = (company_data.get('exchange') or '').upper()
+            if 'SGX' in ex:
+                market = "SG"
 
-        # Step 2: CSV synthesis fallback
+        source_label = ""
+        series = None
+
+        # Step 1: Firecrawl — REAL data scraped from public filings
+        try:
+            series = _fetch_ten_year_via_firecrawl(symbol, company or symbol, market)
+            if series:
+                source_label = (
+                    f"Source: stockanalysis.com (scraped via Firecrawl) — annual filings for {symbol}. "
+                    "Numbers extracted directly from public filings tables."
+                )
+        except Exception:
+            series = None
+
+        # Step 2: CSV synthesis fallback (math-derived from screening metrics)
         if not series and company_data:
             series = _synthesize_history_from_csv_row(company_data)
             if series:
                 source_label = (
                     f"Source: Model-derived 10-year extrapolation from current metrics + 5-year growth "
-                    f"rates (Market Cap, PE, Margins). Years 6-10 assume the same growth pattern. "
-                    f"Indicative only — cross-check against 10-K filings before any investment decision."
+                    f"rates (Market Cap, PE, Margins). Indicative only — cross-check against 10-K "
+                    f"filings before any investment decision."
+                )
+
+        # Step 3: Claude training memory (LAST resort, clearly flagged)
+        if not series:
+            series = _fetch_ten_year_via_claude(symbol, company or symbol)
+            if series:
+                source_label = (
+                    f"Source: Claude AI estimates from training memory — figures for {symbol} are "
+                    f"approximate. Verify against 10-K / primary filings before any investment decision."
                 )
 
         if not series:
