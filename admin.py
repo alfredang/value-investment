@@ -309,16 +309,16 @@ def show_api_keys_tab(config: AppConfig):
     # Get current keys (from config or env)
     current_keys = get_api_keys()
 
-    # Claude authentication (no API key needed — uses Claude Code CLI subscription)
+    # Claude authentication via Claude Code CLI subscription token
     st.markdown("### Claude Authentication")
     st.info(
-        "This app uses **claude-agent-sdk** which authenticates via your local "
-        "Claude Code CLI subscription. No API key needed.\n\n"
+        "This app uses your **Claude Code subscription token**.\n\n"
         "**Setup (one-time):**\n"
         "1. Install Node.js\n"
         "2. Install Claude Code CLI: `npm install -g @anthropic-ai/claude-code`\n"
-        "3. Run `claude /login` and complete OAuth\n\n"
-        "Once logged in, all AI features in this app will work."
+        "3. Run `claude /login` and complete OAuth\n"
+        "4. Run `claude setup-token` in your terminal to generate a subscription token\n"
+        "5. Paste the token into the auth field on the main page"
     )
     new_anthropic = ""  # legacy field kept zeroed for save compatibility
 

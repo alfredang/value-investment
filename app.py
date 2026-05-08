@@ -563,9 +563,10 @@ def show_company_detail_popup(symbol: str, data: dict):
 def init_config():
     """Initialize configuration from admin settings.
 
-    Auth: by default uses Claude Code CLI subscription via claude-agent-sdk.
-    A user-supplied API key in session_state['anthropic_api_key'] overrides
-    this and gets pushed to ANTHROPIC_API_KEY env var on each rerun.
+    Auth: uses Claude Code CLI subscription via claude-agent-sdk. A user-supplied
+    subscription token in session_state['anthropic_credential'] is pushed to
+    CLAUDE_CODE_OAUTH_TOKEN env var on each rerun. Run `claude setup-token` in
+    a terminal to generate a token.
     """
     if ADMIN_AVAILABLE:
         api_keys = get_api_keys()
@@ -580,13 +581,9 @@ def init_config():
         if 'analysis_config' not in st.session_state:
             st.session_state['analysis_config'] = config.analysis_config
 
-    # Re-apply any user-supplied credential to the appropriate env var on each
-    # rerun. We support either an Anthropic API key OR a Claude Code OAuth token.
+    # Re-apply the user-supplied Claude Code subscription token on each rerun.
     cred = st.session_state.get('anthropic_credential', '').strip()
-    cred_type = st.session_state.get('credential_type', '')
-    if cred and cred_type == 'api_key':
-        os.environ['ANTHROPIC_API_KEY'] = cred
-    elif cred and cred_type == 'oauth_token':
+    if cred:
         os.environ['CLAUDE_CODE_OAUTH_TOKEN'] = cred
 
 
@@ -742,64 +739,47 @@ def main():
     st.markdown("*AI-powered stock screening, anomaly detection, and investment analysis*")
 
     # ----------------------------------------------------------------
-    # Auth: accept either an Anthropic API key (sk-ant-...) OR a Claude Code
-    # subscription OAuth token. Auto-detects by prefix and sets the right env var.
+    # Auth: Claude Code subscription OAuth token only.
+    # To get a token, run `claude setup-token` in your terminal.
     # ----------------------------------------------------------------
     _saved_credential = st.session_state.get('anthropic_credential', '').strip()
-    _credential_type = st.session_state.get('credential_type', '')  # 'api_key' | 'oauth_token' | ''
 
-    if _credential_type == 'api_key':
-        _auth_label = "🔑 API key configured — using Anthropic API (paid)"
-    elif _credential_type == 'oauth_token':
+    if _saved_credential:
         _auth_label = "🎫 Subscription token configured — using Claude Code subscription"
     else:
-        _auth_label = "🔓 Using local Claude Code CLI subscription (no credential set)"
+        _auth_label = "🔓 Enter your Claude Code Token"
 
     with st.expander(_auth_label, expanded=False):
         st.caption(
-            "Paste either an Anthropic **API key** (starts with `sk-ant-...`) for paid API "
-            "access, OR a Claude Code **subscription OAuth token** to authenticate via your "
-            "Claude subscription. Leave blank to use the local `claude /login` session."
+            "Paste your Claude Code **subscription OAuth token**. "
+            "To get a token, run `claude setup-token` in your terminal. "
+            "Leave blank to use the local `claude /login` session."
         )
         col_key, col_btn = st.columns([4, 1])
         with col_key:
             new_credential = st.text_input(
-                "API Key or Subscription Token",
+                "Subscription Token",
                 value=_saved_credential,
                 type="password",
-                placeholder="sk-ant-... (API key) or paste your Claude Code subscription token",
-                help=(
-                    "API key format: starts with sk-ant-... (from console.anthropic.com)\n"
-                    "Subscription token: long OAuth token from your Claude Code account\n"
-                    "Auto-detected by prefix; correct env var is set automatically."
-                ),
+                placeholder="Paste your Claude Code subscription token",
+                help="Run `claude setup-token` in your terminal to generate this token.",
                 label_visibility="collapsed",
                 key="credential_input",
             )
         with col_btn:
             if st.button("Save", use_container_width=True, key="save_credential_btn"):
                 cleaned = (new_credential or '').strip()
-                # Always wipe both env vars first so we don't leave stale ones
-                os.environ.pop('ANTHROPIC_API_KEY', None)
                 os.environ.pop('CLAUDE_CODE_OAUTH_TOKEN', None)
                 if cleaned:
-                    if cleaned.startswith('sk-ant-'):
-                        os.environ['ANTHROPIC_API_KEY'] = cleaned
-                        st.session_state['credential_type'] = 'api_key'
-                    else:
-                        os.environ['CLAUDE_CODE_OAUTH_TOKEN'] = cleaned
-                        st.session_state['credential_type'] = 'oauth_token'
+                    os.environ['CLAUDE_CODE_OAUTH_TOKEN'] = cleaned
                     st.session_state['anthropic_credential'] = cleaned
                 else:
-                    st.session_state['credential_type'] = ''
                     st.session_state['anthropic_credential'] = ''
                 st.rerun()
         if _saved_credential:
-            if st.button("Clear credential (revert to local CLI login)",
+            if st.button("Clear token (revert to local CLI login)",
                          key="clear_credential_btn"):
                 st.session_state['anthropic_credential'] = ''
-                st.session_state['credential_type'] = ''
-                os.environ.pop('ANTHROPIC_API_KEY', None)
                 os.environ.pop('CLAUDE_CODE_OAUTH_TOKEN', None)
                 st.rerun()
 
@@ -1250,7 +1230,7 @@ Stocks are classified based on the ratio thresholds you set below:
                     st.markdown("---")
                     col1, col2 = st.columns([3, 1])
                     with col2:
-                        if st.button("➡️ Move to Anomaly Analysis", type="primary", use_container_width=True):
+                        if st.button("➡️ Proceed to Anomaly Analysis", type="primary", use_container_width=True):
                             st.session_state.current_step = 2
                             st.rerun()
 
@@ -1474,7 +1454,7 @@ FORMAT YOUR RESPONSE AS:
                             st.session_state.current_step = 1
                             st.rerun()
                     with col3:
-                        if st.button("➡️ Move to Summary Report", type="primary", use_container_width=True):
+                        if st.button("➡️ Proceed to Summary Report", type="primary", use_container_width=True):
                             st.session_state.current_step = 3
                             st.rerun()
 
