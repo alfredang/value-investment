@@ -1270,10 +1270,37 @@ Stocks are classified based on the ratio thresholds you set below:
 
                     for i, sym in enumerate(selected):
                         progress.progress((i + 1) / len(selected))
-                        status_text.text(f"Analyzing {sym} ({i+1}/{len(selected)})...")
 
                         # --- Gather 10-year financial data ---
                         fin_data = None
+
+                        # Resolve company name + market once (used for Firecrawl + prompt)
+                        filt_df_pre = st.session_state.workflow_data.get('filtered_df')
+                        company_name_pre = ''
+                        market_pre = 'US'
+                        if filt_df_pre is not None and sym in filt_df_pre['Symbol'].values:
+                            row_pre = filt_df_pre[filt_df_pre['Symbol'] == sym].iloc[0]
+                            company_name_pre = row_pre.get('Company', '') or ''
+                            ex = (row_pre.get('Exchange') or '').upper()
+                            if 'SGX' in ex:
+                                market_pre = 'SG'
+
+                        # Source 0: Firecrawl — scrape REAL 10-year filings data (preferred)
+                        try:
+                            from scraper import scrape_financial_data, is_firecrawl_available
+                            if is_firecrawl_available():
+                                status_text.text(f"Scraping real 10-year data for {sym} ({i+1}/{len(selected)}) — Firecrawl...")
+                                scraped = scrape_financial_data(sym, company_name_pre, market_pre)
+                                if scraped.get('ok'):
+                                    fin_data = {
+                                        'source': f"Firecrawl ({scraped.get('source', 'web')})",
+                                        'source_url': scraped.get('source_url', ''),
+                                        'scraped_markdown': scraped.get('markdown', ''),
+                                    }
+                        except Exception:
+                            pass
+
+                        status_text.text(f"Analyzing {sym} ({i+1}/{len(selected)})...")
 
                         # Source 1: XLS file (if available)
                         if sym in available:
@@ -1353,12 +1380,37 @@ Stocks are classified based on the ratio thresholds you set below:
                             if filt_df is not None and sym in filt_df['Symbol'].values:
                                 company_name = filt_df[filt_df['Symbol'] == sym].iloc[0].get('Company', '')
 
-                            data_summary = json.dumps(fin_data, default=str, indent=2) if fin_data else "No financial history available."
+                            # Build the data block — prefer raw scraped markdown
+                            # (preserves real financial tables) over JSON dump.
+                            if fin_data and fin_data.get('scraped_markdown'):
+                                data_summary = (
+                                    f"DATA SOURCE: {fin_data.get('source', 'web')}\n"
+                                    f"SOURCE URL: {fin_data.get('source_url', '')}\n\n"
+                                    f"{fin_data['scraped_markdown']}"
+                                )
+                                data_provenance_note = (
+                                    "The data above is REAL, scraped from public filings — base your "
+                                    "analysis on these specific numbers. Cite specific years and figures."
+                                )
+                            elif fin_data:
+                                data_summary = json.dumps(fin_data, default=str, indent=2)
+                                data_provenance_note = (
+                                    "The data above is structured from internal sources — "
+                                    "analyze based on these specific numbers."
+                                )
+                            else:
+                                data_summary = "No financial history available."
+                                data_provenance_note = (
+                                    "No financial data was available — state explicitly that you "
+                                    "cannot perform a forensic analysis without filings data."
+                                )
 
                             prompt = f"""Analyze the financial history of {sym} ({company_name}) for anomalies and one-off distortions.
 
 FINANCIAL DATA (up to 10 years):
 {data_summary}
+
+{data_provenance_note}
 
 ANALYSIS REQUIRED:
 1. **One-Off Income/Expenses**: Identify any years with unusual spikes or drops in revenue, net income, or operating income that appear to be one-off events (e.g., asset sales, write-downs, restructuring charges, legal settlements, pandemic impact).
