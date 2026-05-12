@@ -1259,6 +1259,137 @@ Stocks are classified based on the ratio thresholds you set below:
                      "**revenue/earnings spikes or drops**, and other distortions that may not reflect "
                      "the company's normal earning power.")
 
+            # ────────────────────────────────────────────────────────────────
+            # Configurable scraping sources (client spec: Bloomberg, Reuters,
+            # Morningstar, Gurufocus by default; user can add/edit/disable).
+            # ────────────────────────────────────────────────────────────────
+            from scraper import DEFAULT_SOURCES as _DEFAULT_SOURCES, render_url as _render_url
+
+            # Seed session state from defaults on first render.
+            # Each source: {label, homepage, url_template, enabled, is_default}
+            #   - homepage:    bare domain URL shown to client (matches client spec)
+            #   - url_template: per-ticker URL Firecrawl actually hits
+            if 'scraping_sources' not in st.session_state:
+                st.session_state.scraping_sources = [
+                    {"label": lbl, "homepage": home, "url_template": tpl,
+                     "enabled": True, "is_default": True}
+                    for lbl, home, tpl in _DEFAULT_SOURCES
+                ]
+
+            with st.expander("🌐 Scraping Sources — control which sites Firecrawl pulls real data from",
+                              expanded=False):
+                st.markdown(
+                    "**Default sources (client spec):** Bloomberg, Reuters, Morningstar, Gurufocus.\n\n"
+                    "Each enabled source is scraped per company by Firecrawl. The data Claude "
+                    "analyzes is **only what comes back from these sites** — no hallucinated numbers."
+                )
+
+                # Header
+                hc1, hc2, hc3, hc4 = st.columns([0.7, 2, 5, 0.6])
+                with hc1: st.markdown("**On**")
+                with hc2: st.markdown("**Source**")
+                with hc3: st.markdown("**Website**")
+                with hc4: st.markdown("**Del**")
+
+                # Rows
+                to_delete = []
+                for idx, src in enumerate(st.session_state.scraping_sources):
+                    c1, c2, c3, c4 = st.columns([0.7, 2, 5, 0.6])
+                    with c1:
+                        src["enabled"] = st.checkbox(
+                            "enabled", value=src.get("enabled", True),
+                            key=f"src_en_{idx}", label_visibility="collapsed"
+                        )
+                    is_default = src.get("is_default", False)
+                    with c2:
+                        if is_default:
+                            st.markdown(f"**{src.get('label', '')}**")
+                        else:
+                            src["label"] = st.text_input(
+                                "label", value=src.get("label", ""),
+                                key=f"src_lbl_{idx}", label_visibility="collapsed",
+                                placeholder="e.g. SimplyWall.St"
+                            )
+                    with c3:
+                        if is_default:
+                            home = src.get("homepage", "")
+                            st.markdown(f"`{home}`")
+                        else:
+                            src["url_template"] = st.text_input(
+                                "url", value=src.get("url_template", ""),
+                                key=f"src_url_{idx}", label_visibility="collapsed",
+                                placeholder="https://site.com/{symbol_upper}/financials"
+                            )
+                            src["homepage"] = src["url_template"]
+                    with c4:
+                        if st.button("🗑️", key=f"src_del_{idx}",
+                                     help=("Delete this source (default site)"
+                                           if is_default else "Delete this source")):
+                            to_delete.append(idx)
+
+                if to_delete:
+                    for i in reversed(to_delete):
+                        st.session_state.scraping_sources.pop(i)
+                    st.rerun()
+
+                # Add / reset buttons
+                btn_c1, btn_c2, _ = st.columns([1.8, 1.8, 5])
+                with btn_c1:
+                    if st.button("➕ Add custom source", use_container_width=True,
+                                  help="Add a site beyond the 4 client defaults"):
+                        st.session_state.scraping_sources.append(
+                            {"label": "", "homepage": "", "url_template": "",
+                             "enabled": True, "is_default": False}
+                        )
+                        st.rerun()
+                with btn_c2:
+                    if st.button("↺ Reset to defaults", use_container_width=True,
+                                  help="Restore Bloomberg/Reuters/Morningstar/Gurufocus"):
+                        st.session_state.scraping_sources = [
+                            {"label": lbl, "homepage": home, "url_template": tpl,
+                             "enabled": True, "is_default": True}
+                            for lbl, home, tpl in _DEFAULT_SOURCES
+                        ]
+                        for k in list(st.session_state.keys()):
+                            if str(k).startswith(("src_en_", "src_lbl_", "src_url_")):
+                                del st.session_state[k]
+                        st.rerun()
+
+                # Custom-source URL placeholder help
+                if any(not s.get("is_default") for s in st.session_state.scraping_sources):
+                    st.caption(
+                        "💡 For custom sources, use placeholders in the URL: "
+                        "`{symbol_upper}`, `{symbol_lower}`, `{symbol}`, `{market}` "
+                        "(us/sg). Example: `https://example.com/quote/{symbol_upper}`"
+                    )
+
+                st.markdown("---")
+
+                # Live preview of resolved URLs for the first selected ticker
+                if selected:
+                    sample_sym = selected[0]
+                    sample_mkt = 'US'
+                    fdf = st.session_state.workflow_data.get('filtered_df')
+                    if fdf is not None and sample_sym in fdf['Symbol'].values:
+                        ex = (fdf[fdf['Symbol'] == sample_sym].iloc[0].get('Exchange') or '').upper()
+                        if 'SGX' in ex:
+                            sample_mkt = 'SG'
+                    st.markdown(
+                        f"**🔍 Preview** — exact URLs Firecrawl will fetch for "
+                        f"**{sample_sym}** ({sample_mkt}):"
+                    )
+                    enabled_srcs = [s for s in st.session_state.scraping_sources
+                                    if s.get("enabled")
+                                    and s.get("url_template", "").strip()
+                                    and s.get("label", "").strip()]
+                    if not enabled_srcs:
+                        st.warning("⚠️ No sources enabled — scraping will skip and analysis "
+                                   "will fall back to limited CSV data only.")
+                    else:
+                        for s in enabled_srcs:
+                            resolved = _render_url(s["url_template"], sample_sym, sample_mkt)
+                            st.code(f"{s['label']}: {resolved}", language=None)
+
             # Auth handled by Claude Code CLI subscription (no API key needed)
             if not AI_AVAILABLE:
                 st.error("claude-agent-sdk not installed. Run `pip install -r requirements.txt`.")
@@ -1289,8 +1420,28 @@ Stocks are classified based on the ratio thresholds you set below:
                         try:
                             from scraper import scrape_financial_data, is_firecrawl_available
                             if is_firecrawl_available():
-                                status_text.text(f"Scraping real 10-year data for {sym} ({i+1}/{len(selected)}) — Firecrawl...")
-                                scraped = scrape_financial_data(sym, company_name_pre, market_pre)
+                                # Build the source list from session state (user-configurable).
+                                # Pass the 3-tuple form so the scraper can hit the per-ticker
+                                # subpath while we still display the bare-domain in UI.
+                                user_sources = [
+                                    (s["label"].strip(),
+                                     s.get("homepage", "").strip(),
+                                     s["url_template"].strip())
+                                    for s in st.session_state.get('scraping_sources', [])
+                                    if s.get("enabled")
+                                       and s.get("url_template", "").strip()
+                                       and s.get("label", "").strip()
+                                ]
+                                src_summary = (", ".join(lbl for lbl, _, _ in user_sources)
+                                               if user_sources else "Bloomberg, Reuters, Morningstar, Gurufocus (defaults)")
+                                status_text.text(
+                                    f"Scraping real 10-year data for {sym} "
+                                    f"({i+1}/{len(selected)}) — Firecrawl ({src_summary})..."
+                                )
+                                scraped = scrape_financial_data(
+                                    sym, company_name_pre, market_pre,
+                                    custom_sources=user_sources if user_sources else None,
+                                )
                                 if scraped.get('ok'):
                                     fin_data = {
                                         'source': f"Firecrawl ({scraped.get('source', 'web')})",
