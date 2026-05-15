@@ -34,37 +34,66 @@ except ImportError:
 #     where the real financial data lives — the homepage itself has none).
 DEFAULT_SOURCES: List[Tuple[str, str, str]] = [
     # Gurufocus first — most universal across exchanges and rarely paywalled.
+    # For SGX tickers the canonical Gurufocus path is SGX:{ticker}.
     ("Gurufocus",
      "https://www.gurufocus.com/",
-     "https://www.gurufocus.com/stock/{symbol_upper}/financials"),
-    # Stock Analysis — universal, no exchange suffix, scraper-friendly, 10-yr history.
+     "https://www.gurufocus.com/stock/{gurufocus_path}/financials"),
+    # Stock Analysis — universal, scraper-friendly. For SGX use ".si"-suffix.
     ("Stock Analysis",
      "https://stockanalysis.com/",
-     "https://stockanalysis.com/stocks/{symbol_lower}/financials/"),
-    # Bloomberg ":US" suffix works for both NASDAQ and NYSE US listings.
+     "https://stockanalysis.com/{stockanalysis_path}/financials/"),
+    # Bloomberg — ":US" for US listings, ":SP" for Singapore.
     ("Bloomberg",
      "https://www.bloomberg.com/",
-     "https://www.bloomberg.com/quote/{symbol_upper}:US"),
-    # Reuters — bare ticker (no .OQ/.N suffix) lets Reuters redirect to the
-    # canonical exchange-aware page; the hardcoded .OQ blocked all NYSE tickers.
+     "https://www.bloomberg.com/quote/{symbol_upper}:{bloomberg_suffix}"),
+    # Reuters — bare ticker for US, {ticker}.SI for SGX.
     ("Reuters",
      "https://www.reuters.com/",
-     "https://www.reuters.com/markets/companies/{symbol_upper}"),
-    # Morningstar — use the search URL so we don't have to guess xnas vs xnys.
+     "https://www.reuters.com/markets/companies/{reuters_path}"),
+    # Morningstar — use the search URL so we don't have to guess exchange code.
+    # For SGX, prepend xses/ to land on the canonical SGX page.
     ("Morningstar",
      "https://www.morningstar.com/",
-     "https://www.morningstar.com/stocks/{symbol_lower}"),
+     "https://www.morningstar.com/stocks/{morningstar_path}"),
 ]
 
 
 def render_url(template: str, symbol: str, market: str = "US") -> str:
-    """Substitute placeholders in a URL template."""
+    """Substitute placeholders in a URL template.
+
+    Market-aware: when market='SG' the URLs are rewritten to use the
+    SGX-specific paths (`:SP` Bloomberg suffix, `xses` Morningstar code,
+    `.SI` Reuters/Stock Analysis suffix, `SGX:` Gurufocus prefix).
+    """
+    sym_upper = symbol.upper()
+    sym_lower = symbol.lower()
+    is_sg = market.upper() == "SG"
+
+    # Per-source path / suffix overrides for SG tickers
+    if is_sg:
+        gurufocus_path = f"SGX:{sym_upper}"
+        stockanalysis_path = f"quote/sgx/{sym_upper}"
+        bloomberg_suffix = "SP"
+        reuters_path = f"{sym_upper}.SI"
+        morningstar_path = f"xses/{sym_lower}"
+    else:
+        gurufocus_path = sym_upper
+        stockanalysis_path = f"stocks/{sym_lower}"
+        bloomberg_suffix = "US"
+        reuters_path = sym_upper
+        morningstar_path = sym_lower
+
     return (
         template
-        .replace("{symbol_upper}", symbol.upper())
-        .replace("{symbol_lower}", symbol.lower())
+        .replace("{symbol_upper}", sym_upper)
+        .replace("{symbol_lower}", sym_lower)
         .replace("{market}", market.lower())
         .replace("{symbol}", symbol)
+        .replace("{gurufocus_path}", gurufocus_path)
+        .replace("{stockanalysis_path}", stockanalysis_path)
+        .replace("{bloomberg_suffix}", bloomberg_suffix)
+        .replace("{reuters_path}", reuters_path)
+        .replace("{morningstar_path}", morningstar_path)
     )
 
 

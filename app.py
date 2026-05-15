@@ -1390,7 +1390,7 @@ share and directly comparable to the live price next to it.
 
             # Bumped whenever DEFAULT_SOURCES URLs change so stale sessions
             # refresh their cached source list automatically.
-            _SOURCES_VERSION = 2
+            _SOURCES_VERSION = 3
 
             # Seed session state from defaults on first render, or refresh
             # them when DEFAULT_SOURCES version was bumped. User-added custom
@@ -1621,9 +1621,14 @@ share and directly comparable to the live price next to it.
                         # markdown — ensures we still have REAL multi-year data
                         # to feed Claude before declaring NO_DATA in strict mode.
                         if fin_data is None:
+                            # yfinance uses {ticker}.SI for SGX-listed stocks. Compute
+                            # this OUTSIDE the try so the diagnostic line below in the
+                            # except branch can still reference yf_symbol if the
+                            # yfinance import itself fails.
+                            yf_symbol = f"{sym}.SI" if market_pre == "SG" else sym
                             try:
                                 import yfinance as _yf
-                                t = _yf.Ticker(sym)
+                                t = _yf.Ticker(yf_symbol)
                                 inc = t.income_stmt
                                 cf = t.cashflow
                                 if inc is not None and not inc.empty:
@@ -1651,14 +1656,14 @@ share and directly comparable to the live price next to it.
                                     }
                                     scrape_diag.setdefault("source_status", []).append({
                                         "label": "yfinance",
-                                        "url": f"yfinance.Ticker('{sym}')",
+                                        "url": f"yfinance.Ticker('{yf_symbol}')",
                                         "status": f"ok:{len(periods)} periods",
                                         "bytes": 0,
                                     })
                             except Exception as e:
                                 scrape_diag.setdefault("source_status", []).append({
                                     "label": "yfinance",
-                                    "url": f"yfinance.Ticker('{sym}')",
+                                    "url": f"yfinance.Ticker('{yf_symbol}')",
                                     "status": f"error:{type(e).__name__}: {str(e)[:120]}",
                                     "bytes": 0,
                                 })
@@ -2019,10 +2024,11 @@ FORMAT YOUR RESPONSE AS:
                 if not comparable_symbols:
                     st.info("No companies selected for comparison.")
                 else:
-                    selected_for_compare = st.selectbox(
+                    selected_for_compare = st.radio(
                         "Choose a company to compare against peers:",
                         options=comparable_symbols,
                         format_func=lambda s: f"{s} — {next((d['company'] for d in report_data if d['symbol'] == s), s)}",
+                        horizontal=True,
                         key="competitor_compare_select",
                     )
 
@@ -2130,7 +2136,7 @@ FORMAT YOUR RESPONSE AS:
                         def update_progress_xlsx(message):
                             progress_container.text(message)
 
-                        with st.spinner("Generating Excel report with 10-year VIA-style charts... This may take a few minutes (Firecrawl + Claude calls per company)."):
+                        with st.spinner("Preparing your investment report — this may take a few minutes while we gather the latest financial data for each company."):
                             xlsx_buffer = generate_excel_report(
                                 report_data=report_data,
                                 criteria=criteria,

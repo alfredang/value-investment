@@ -1222,14 +1222,14 @@ def generate_excel_report(
         progress_callback = lambda _msg: None
 
     wb = openpyxl.Workbook()
-    progress_callback("Building summary sheet...")
+    progress_callback("Preparing the summary page...")
     _build_summary_sheet(wb, report_data, criteria)
 
     for idx, company_data in enumerate(report_data):
         symbol = company_data.get("symbol", f"Stock_{idx + 1}")
         company = company_data.get("company", "Unknown Company")
         progress_callback(
-            f"Building {symbol} sheet ({idx + 1}/{len(report_data)})..."
+            f"Working on {company} ({symbol}) — {idx + 1} of {len(report_data)}..."
         )
 
         # Per-company sheet
@@ -1248,13 +1248,13 @@ def generate_excel_report(
         next_row += 2
 
         # Generate AI text (reuse the same functions as DOCX)
-        progress_callback(f"  Generating AI background for {symbol}...")
+        progress_callback(f"  Writing the business overview for {symbol}...")
         background = generate_company_background(None, company_data)
-        progress_callback(f"  Generating AI deep-dive for {symbol}...")
+        progress_callback(f"  Preparing the analyst commentary for {symbol}...")
         deep_dive = generate_company_deep_dive(None, company_data)
 
         # Scrape and extract multi-metric series for the VIA-style chart grid
-        progress_callback(f"  Extracting VIA ATLAS metric series for {symbol}...")
+        progress_callback(f"  Gathering 10-year financial history for {symbol}...")
         market = "SG" if "SGX" in str(company_data.get("exchange", "")).upper() else "US"
         try:
             atlas_metrics = _scrape_atlas_metrics(symbol, company, market)
