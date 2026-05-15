@@ -287,32 +287,75 @@ class Valuator:
         return ValuationStatus.OVERVALUED, ratio, margin
 
     def analyze_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Add 'Low IV', 'High IV', 'Valuation' columns using the in-house formula."""
+        """Add 'Low IV', 'High IV', 'Valuation' columns.
+
+        Per client requirement: every row gets a verdict — Undervalued, Fair
+        Value, or Overvalued. Never N/A. Tiered logic:
+
+          1. In-house two-stage DCF (preferred — produces a Low IV / High IV
+             range from EPS history).
+          2. If DCF can't run but EPV per share is positive: classify the
+             Current Price against EPV ± 30% bands (Low IV = EPV * 0.7,
+             High IV = EPV * 1.3). Same buy-discipline logic, anchored on
+             EPV instead of DCF.
+          3. If EPV is zero or negative (loss-making): the company has no
+             positive earnings power per share, so any positive market price
+             is Overvalued by definition. Low IV / High IV set to 0.00.
+        """
+        def _num(v):
+            try:
+                f = float(v) if v is not None else None
+                return f if (f is None or f == f) else None  # filter NaN
+            except (TypeError, ValueError):
+                return None
+
         df = df.copy()
         low_ivs, high_ivs, verdicts = [], [], []
 
         for _, row in df.iterrows():
+            cp = _num(row.get('Current Price'))
+            epv = _num(row.get('Earnings Power Value (EPV)'))
+
+            # --- Tier 1: in-house DCF ---
+            iv = None
             inputs = derive_eps_inputs_from_csv_row(row)
-            if inputs is None:
-                low_ivs.append(None)
-                high_ivs.append(None)
-                verdicts.append(ValuationStatus.NA.value)
+            if inputs is not None:
+                present_eps, past_eps, years_back = inputs
+                iv = compute_in_house_valuation(present_eps, past_eps,
+                                                years_back=years_back)
+            if iv is not None:
+                # Edge case: DCF math can produce a non-positive IV when EPS
+                # is tiny and growth caps push values weirdly. Treat that the
+                # same as the loss-making tier — Overvalued, no N/A emitted.
+                if iv['low_iv'] <= 0 or iv['high_iv'] <= 0:
+                    low_ivs.append(max(0.0, iv['low_iv']))
+                    high_ivs.append(max(0.0, iv['high_iv']))
+                    verdicts.append(ValuationStatus.OVERVALUED.value)
+                else:
+                    low_ivs.append(iv['low_iv'])
+                    high_ivs.append(iv['high_iv'])
+                    verdicts.append(
+                        classify_verdict(cp, iv['low_iv'], iv['high_iv']).value
+                    )
                 continue
-            present_eps, past_eps, years_back = inputs
-            iv = compute_in_house_valuation(present_eps, past_eps, years_back=years_back)
-            if iv is None:
-                low_ivs.append(None)
-                high_ivs.append(None)
-                verdicts.append(ValuationStatus.NA.value)
+
+            # --- Tier 2: EPV-based fallback (positive EPV, no DCF) ---
+            if epv is not None and epv > 0 and cp is not None and cp > 0:
+                low_iv = round(epv * 0.7, 2)
+                high_iv = round(epv * 1.3, 2)
+                low_ivs.append(low_iv)
+                high_ivs.append(high_iv)
+                verdicts.append(
+                    classify_verdict(cp, low_iv, high_iv).value
+                )
                 continue
-            low_ivs.append(iv['low_iv'])
-            high_ivs.append(iv['high_iv'])
-            current_price = row.get('Current Price')
-            try:
-                cp = float(current_price) if current_price is not None else None
-            except (TypeError, ValueError):
-                cp = None
-            verdicts.append(classify_verdict(cp, iv['low_iv'], iv['high_iv']).value)
+
+            # --- Tier 3: loss-making / no EPV -> Overvalued ---
+            # Any positive market price is unjustifiable when EPV per share
+            # is <= 0. Per client spec: never emit N/A.
+            low_ivs.append(0.0)
+            high_ivs.append(0.0)
+            verdicts.append(ValuationStatus.OVERVALUED.value)
 
         df['Low IV'] = low_ivs
         df['High IV'] = high_ivs

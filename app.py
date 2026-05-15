@@ -352,17 +352,34 @@ def render_stock_card(symbol: str, company: str, data: dict, card_index: int = 0
     }
     val_fg, val_bg = val_map.get(valuation, ('#cbd5e1', '#1e293b'))
 
-    # Buy price (EPV * user-defined discount)
-    mos_discount = st.session_state.get('_v_mos_discount', 0.7)
-    buy_price = None
-    if epv is not None:
+    # Buy-price RANGE from in-house two-stage DCF (per client's Excel formula).
+    # Low IV / High IV are per-share — same units as Current Price — so the
+    # comparison "is the price inside the buy range?" is meaningful.
+    low_iv = data.get('Low IV')
+    high_iv = data.get('High IV')
+
+    def _fnum(v):
         try:
-            buy_price = float(epv) * mos_discount
-        except (ValueError, TypeError):
-            pass
+            f = float(v)
+            return f if f == f else None
+        except (TypeError, ValueError):
+            return None
+
+    low_iv_n = _fnum(low_iv)
+    high_iv_n = _fnum(high_iv)
 
     price_str = f"${float(current_price):.2f}" if current_price else "N/A"
-    buy_str = f"${buy_price:.2f}" if buy_price else "N/A"
+    if low_iv_n is not None and high_iv_n is not None:
+        if low_iv_n == 0.0 and high_iv_n == 0.0:
+            # Screener's EPV is non-positive — no positive intrinsic value
+            # could be derived. NOT a statement about current profitability.
+            buy_str = "EPV ≤ $0"
+        elif abs(high_iv_n - low_iv_n) < 0.005:
+            buy_str = f"${low_iv_n:.2f}"
+        else:
+            buy_str = f"${low_iv_n:.2f} – ${high_iv_n:.2f}"
+    else:
+        buy_str = "N/A"
 
     company_display = (company[:40] + '...') if company and len(company) > 40 else (company or 'N/A')
 
@@ -391,7 +408,7 @@ def render_stock_card(symbol: str, company: str, data: dict, card_index: int = 0
                 <span style='font-size:16px;font-weight:700;color:#f8fafc;'>{price_str}</span>
             </div>
             <div style='display:flex;align-items:center;gap:12px;'>
-                <span style='font-size:11px;color:#94a3b8;'>Buy: {buy_str}</span>
+                <span style='font-size:11px;color:#94a3b8;' title='Intrinsic value range (Low IV – High IV) from the in-house two-stage DCF formula. Undervalued when price < Low IV, Overvalued when price > High IV.'>IV Range: {buy_str}</span>
                 <span style='background:{val_bg};color:{val_fg};padding:4px 12px;border-radius:4px;
                              font-size:11px;font-weight:700;text-transform:uppercase;border:1px solid {val_fg};'>
                     {valuation}
@@ -440,11 +457,13 @@ def show_company_detail_popup(symbol: str, data: dict):
             emoji = {'Undervalued': '🟢', 'Fair': '🟡', 'Fair Value': '🟡', 'Overvalued': '🔴'}.get(val, '⚪')
             st.metric("Valuation", f"{emoji} {val}")
         with col3:
-            hi = data.get('Highest Intrinsic Value')
-            st.metric("Highest IV", f"${float(hi):,.0f}M" if hi else "N/A")
+            hi = data.get('High IV')
+            st.metric("High IV (per share)", f"${float(hi):.2f}" if hi is not None and pd.notna(hi) else "N/A",
+                      help="In-house two-stage DCF — aggressive scenario")
         with col4:
-            lo = data.get('Lowest Intrinsic Value')
-            st.metric("Lowest IV", f"${float(lo):,.0f}M" if lo else "N/A")
+            lo = data.get('Low IV')
+            st.metric("Low IV (per share)", f"${float(lo):.2f}" if lo is not None and pd.notna(lo) else "N/A",
+                      help="In-house two-stage DCF — conservative scenario (with 30% margin of safety)")
 
         st.markdown("---")
 
@@ -564,6 +583,47 @@ def show_company_detail_popup(symbol: str, data: dict):
             st.rerun()
 
 
+def _bridge_streamlit_secrets_to_env():
+    """
+    Copy Streamlit Cloud secrets into os.environ so the rest of the app
+    (which uses os.getenv) finds them. Locally this is a no-op because
+    .env loads into env vars directly via python-dotenv.
+
+    Streamlit Cloud users add their keys in the app's Secrets dashboard
+    (Settings → Secrets) in TOML format, e.g.:
+
+        FIRECRAWL_API_KEY = "fc-..."
+        CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat01-..."
+        FMP_API_KEY = "..."
+
+    Without this bridge, st.secrets is the only way to read them — but
+    helper modules (scraper.py, llm.py) all use os.getenv.
+    """
+    keys_to_bridge = [
+        "FIRECRAWL_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "FMP_API_KEY",
+        "TAVILY_API_KEY",
+        "NEWS_API_KEY",
+        "TWELVE_DATA_API_KEY",
+    ]
+    try:
+        secrets = getattr(st, "secrets", None)
+        if not secrets:
+            return
+        for key in keys_to_bridge:
+            try:
+                if key in secrets and not os.environ.get(key):
+                    val = secrets[key]
+                    if val:
+                        os.environ[key] = str(val)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
 def init_config():
     """Initialize configuration from admin settings.
 
@@ -572,6 +632,9 @@ def init_config():
     CLAUDE_CODE_OAUTH_TOKEN env var on each rerun. Run `claude setup-token` in
     a terminal to generate a token.
     """
+    # Bridge Streamlit Cloud secrets → env vars (no-op locally)
+    _bridge_streamlit_secrets_to_env()
+
     if ADMIN_AVAILABLE:
         api_keys = get_api_keys()
         apply_api_keys_to_env(api_keys)
@@ -880,70 +943,48 @@ def show_tabbed_workflow():
     if current == 1:
         st.markdown("### 📊 Companies Screening: Upload data and set screening criteria")
 
-        # Valuation methodology + configurable formula
-        with st.expander("⚙️ Valuation Formula Settings", expanded=False):
+        # Valuation methodology — in-house two-stage DCF (per client's Excel)
+        with st.expander("⚙️ Valuation Formula (In-House Two-Stage DCF)", expanded=False):
             st.markdown("""
-#### How Valuation Works
+#### Valuation: In-House Two-Stage DCF
 
-**Formula:** `Valuation Ratio = EPV / Market Cap`
+Every screened stock is valued using the client's in-house formula (transcribed
+exactly from `In-house valuation.xlsx`). Two intrinsic-value scenarios are
+computed per share, giving a **range** instead of a single point estimate:
 
-**EPV** (Earnings Power Value) = (Adjusted Earnings x (1 - Tax Rate)) / WACC
-— a conservative intrinsic value that ignores growth assumptions.
+```
+historical_growth = (Present_EPS / Past_EPS) ^ (1/years_back) − 1
+Low_IV_growth     = MIN(historical_growth / 8, 3%)    ← conservative
+High_IV_growth    = MIN(historical_growth / 2, 12%)   ← aggressive
 
-Stocks are classified based on the ratio thresholds you set below:
-            """)
+For each scenario:
+  Stage 1 = F·(1+g)·(1 − ((1+g)/(1+I))^H) / (I − g)        ← growth phase
+  Stage 2 = F·(1+g)^H · (1+J)·(1 − ((1+J)/(1+I))^K) / (I − J) / (1+I)^H
+  IV      = (Stage 1 + Stage 2) · (1 − L)
+```
 
-            st.markdown("---")
-            st.markdown("#### Customize Thresholds")
+**Constants** (fixed, per client's Excel):
 
-            # Initialize valuation settings in session state
-            if '_v_underval_thresh' not in st.session_state:
-                st.session_state['_v_underval_thresh'] = 1.3
-            if '_v_overval_thresh' not in st.session_state:
-                st.session_state['_v_overval_thresh'] = 0.7
-            if '_v_mos_discount' not in st.session_state:
-                st.session_state['_v_mos_discount'] = 0.7
+| Symbol | Meaning | Value |
+|---|---|---|
+| F | Present EPS | from CSV (Current Price ÷ PE, or EPV × WACC) |
+| H | Growth-phase years | **10** |
+| I | Discount rate | **10 %** |
+| J | Terminal growth / inflation | **2 %** |
+| K | Terminal-phase years | **10** |
+| L | Margin of safety | **30 %** (built in) |
 
-            vc1, vc2, vc3 = st.columns(3)
-            with vc1:
-                underval_thresh = st.number_input(
-                    "🟢 Undervalued if EPV/MC >",
-                    min_value=0.5, max_value=5.0, step=0.1,
-                    value=st.session_state['_v_underval_thresh'],
-                    key="_underval_thresh_input",
-                    help="Stocks with EPV/MC above this are classified as Undervalued"
-                )
-                st.session_state['_v_underval_thresh'] = underval_thresh
-            with vc2:
-                overval_thresh = st.number_input(
-                    "🔴 Overvalued if EPV/MC <",
-                    min_value=0.1, max_value=2.0, step=0.1,
-                    value=st.session_state['_v_overval_thresh'],
-                    key="_overval_thresh_input",
-                    help="Stocks with EPV/MC below this are classified as Overvalued"
-                )
-                st.session_state['_v_overval_thresh'] = overval_thresh
-            with vc3:
-                mos_discount = st.number_input(
-                    "💰 Buy Price Discount (x EPV)",
-                    min_value=0.1, max_value=1.0, step=0.05,
-                    value=st.session_state['_v_mos_discount'],
-                    key="_mos_discount_input",
-                    help="Lowest Intrinsic Value = EPV x this factor (margin of safety)"
-                )
-                st.session_state['_v_mos_discount'] = mos_discount
+**Verdict mapping** (no user-tunable thresholds — the 30% margin of safety in
+the formula already encodes the buy discipline):
 
-            # Preview the current thresholds
-            margin_under = (underval_thresh - 1.0) * 100
-            margin_over = (1.0 - overval_thresh) * 100
-            st.markdown(f"""
-| Status | Condition | Interpretation |
-|--------|-----------|----------------|
-| 🟢 **Undervalued** | EPV/MC > **{underval_thresh:.1f}** | EPV is {margin_under:.0f}%+ above Market Cap |
-| 🟡 **Fair Value** | **{overval_thresh:.1f}** ≤ EPV/MC ≤ **{underval_thresh:.1f}** | Within range — fairly priced |
-| 🔴 **Overvalued** | EPV/MC < **{overval_thresh:.1f}** | EPV is {margin_over:.0f}%+ below Market Cap |
+| Status | Condition |
+|---|---|
+| 🟢 **Undervalued** | Current Price < **Low IV** (cheap by both scenarios) |
+| 🟡 **Fair Value** | **Low IV** ≤ Current Price ≤ **High IV** |
+| 🔴 **Overvalued** | Current Price > **High IV** (expensive by both scenarios) |
 
-**Buy Price:** Lowest IV = EPV x {mos_discount:.2f} | Highest IV = EPV
+The card on each stock shows `IV Range: $low – $high` — the buy range is per
+share and directly comparable to the live price next to it.
             """)
 
         # File upload section
@@ -971,7 +1012,10 @@ Stocks are classified based on the ratio thresholds you set below:
                             df['Market'] = 'Other'
                         dfs.append(df)
                     combined_df = pd.concat(dfs, ignore_index=True)
-                    combined_df = combined_df.drop_duplicates(subset=['Symbol'], keep='first')
+                    # Dedupe on Symbol + Market so same-ticker-different-market companies
+                    # (e.g. US BAC = Bank of America vs SG BAC = Camsing Healthcare) are both kept.
+                    dedupe_keys = ['Symbol', 'Market'] if 'Market' in combined_df.columns else ['Symbol']
+                    combined_df = combined_df.drop_duplicates(subset=dedupe_keys, keep='first')
                     st.session_state.workflow_data['screener_df'] = combined_df
 
                     # Upload summary
@@ -1102,13 +1146,29 @@ Stocks are classified based on the ratio thresholds you set below:
 
             st.markdown("---")
 
-            # Screen button
-            if st.button("🔍 Execute Screen", type="primary", use_container_width=True):
+            # Screen button + reset button
+            screen_c1, screen_c2 = st.columns([3, 1])
+            with screen_c1:
+                run_screen = st.button("🔍 Execute Screen", type="primary", use_container_width=True)
+            with screen_c2:
+                if st.button("↺ Reset filters", use_container_width=True,
+                             help="Reset all sliders to their default values"):
+                    # Clear all slider/input keys so they pick up defaults on next render
+                    for k in ['gm', 'nm', 'roa', 'roe', 'fcf', 'rev', 'eps',
+                              'roic', 'rote', 'de']:
+                        st.session_state.pop(f'{k}_s', None)
+                        st.session_state.pop(f'{k}_i', None)
+                    st.rerun()
+
+            if run_screen:
                 df = src_df.copy()
+                filter_trace = [("Uploaded", "", "", len(df), len(df))]
 
                 # Exchange filter
                 if selected_exchanges and 'Exchange' in df.columns:
+                    before = len(df)
                     df = df[df['Exchange'].isin(selected_exchanges)]
+                    filter_trace.append(("Exchange", "in", ",".join(selected_exchanges), before, len(df)))
 
                 # Apply all criteria
                 filter_config = {
@@ -1126,32 +1186,33 @@ Stocks are classified based on the ratio thresholds you set below:
 
                 for col, (op, threshold) in filter_config.items():
                     if col in df.columns:
+                        before = len(df)
                         df[col] = pd.to_numeric(df[col], errors='coerce')
                         if op == '>=':
                             df = df[df[col] >= threshold]
                         else:
                             df = df[(df[col] <= threshold) & (df[col] >= 0)]
+                        filter_trace.append((col, op, threshold, before, len(df)))
 
-                # Add valuation + intrinsic value columns using user thresholds
-                ut = st.session_state.get('_v_underval_thresh', 1.3)
-                ot = st.session_state.get('_v_overval_thresh', 0.7)
-                md = st.session_state.get('_v_mos_discount', 0.7)
+                st.session_state.workflow_data['filter_trace'] = filter_trace
 
-                if 'Earnings Power Value (EPV)' in df.columns and 'Market Cap ($M)' in df.columns:
-                    df['Earnings Power Value (EPV)'] = pd.to_numeric(df['Earnings Power Value (EPV)'], errors='coerce')
-                    df['Market Cap ($M)'] = pd.to_numeric(df['Market Cap ($M)'], errors='coerce')
-                    df['EPV/MC'] = df['Earnings Power Value (EPV)'] / df['Market Cap ($M)']
-                    df['EPV/MC'] = df['EPV/MC'].replace([float('inf'), float('-inf')], pd.NA)
+                # In-house two-stage DCF valuation (per client's Excel formula).
+                # Produces per-share Low IV / High IV columns and classifies the
+                # current price against that RANGE — not a single fixed number.
+                from valuation import Valuator
+                df = Valuator().analyze_dataframe(df)
 
-                    df['Highest Intrinsic Value'] = df['Earnings Power Value (EPV)']
-                    df['Lowest Intrinsic Value'] = df['Earnings Power Value (EPV)'] * md
-                    df['Live Share Price'] = pd.to_numeric(df.get('Current Price'), errors='coerce')
+                # Keep Live Share Price for downstream display.
+                df['Live Share Price'] = pd.to_numeric(df.get('Current Price'), errors='coerce')
 
-                    df['Valuation'] = df['EPV/MC'].apply(
-                        lambda x: 'Undervalued' if pd.notna(x) and x > ut else
-                                  'Fair' if pd.notna(x) and x >= ot else
-                                  'Overvalued' if pd.notna(x) and x > 0 else 'N/A'
-                    )
+                # Map "Fair Value" -> "Fair" so existing UI logic keeps working.
+                if 'Valuation' in df.columns:
+                    df['Valuation'] = df['Valuation'].replace({'Fair Value': 'Fair'})
+
+                # Back-compat aliases so downstream code that reads the old column
+                # names still works without further churn.
+                df['Highest Intrinsic Value'] = df.get('High IV')
+                df['Lowest Intrinsic Value'] = df.get('Low IV')
 
                 # Store criteria for report
                 st.session_state.workflow_data['criteria'] = {
@@ -1167,6 +1228,47 @@ Stocks are classified based on the ratio thresholds you set below:
         if st.session_state.agent_results.get('screened'):
             df = st.session_state.workflow_data['filtered_df']
 
+            # Filter cascade diagnostic — shows which criterion eliminated which rows.
+            # Always visible when result is empty, collapsed expander otherwise.
+            trace = st.session_state.workflow_data.get('filter_trace', [])
+            if trace:
+                def _fmt_threshold(op, thr):
+                    if op == "" or op == "in":
+                        return ""
+                    if isinstance(thr, float):
+                        return f" {op} {thr:.2f}"
+                    return f" {op} {thr}"
+
+                def _render_trace_table():
+                    lines = ["| Criterion | Threshold | Before | After | Dropped |",
+                             "|---|---|---|---|---|"]
+                    for name, op, thr, before, after in trace:
+                        dropped = before - after
+                        thr_str = _fmt_threshold(op, thr) if op else "—"
+                        marker = " 🔴" if dropped > 0 and after == 0 else ""
+                        lines.append(f"| {name}{marker} | {thr_str} | {before} | {after} | {dropped} |")
+                    st.markdown("\n".join(lines))
+
+                if len(df) == 0:
+                    # Identify the criterion that killed the result
+                    killer = None
+                    for name, op, thr, before, after in trace:
+                        if before > 0 and after == 0:
+                            killer = (name, op, thr)
+                            break
+                    st.error(
+                        f"⚠️ **0 stocks passed the filter.** "
+                        + (f"The bottleneck was **{killer[0]}{_fmt_threshold(killer[1], killer[2])}** — "
+                           f"loosen this slider to recover results."
+                           if killer else "Loosen one or more sliders and re-run.")
+                    )
+                    with st.expander("📉 Filter elimination cascade — see how many stocks each criterion dropped",
+                                     expanded=True):
+                        _render_trace_table()
+                else:
+                    with st.expander("📉 Filter elimination cascade", expanded=False):
+                        _render_trace_table()
+
             # Results header with count + export
             hdr_col1, hdr_col2 = st.columns([4, 1])
             with hdr_col1:
@@ -1174,8 +1276,8 @@ Stocks are classified based on the ratio thresholds you set below:
             with hdr_col2:
                 export_cols = ['Symbol', 'Company', 'Exchange', 'Sector', 'Gross Margin %', 'Net Margin %',
                                'ROE %', 'ROA %', 'Debt-to-Equity', 'FCF Margin %', 'ROIC-WACC', 'ROTE-WACC',
-                               'Market Cap ($M)', 'Highest Intrinsic Value', 'Lowest Intrinsic Value',
-                               'Live Share Price', 'EPV/MC', 'Valuation']
+                               'Market Cap ($M)', 'Low IV', 'High IV',
+                               'Live Share Price', 'Valuation']
                 avail_export = [c for c in export_cols if c in df.columns]
                 csv_data = df[avail_export].to_csv(index=False)
                 st.download_button("📥 Export CSV", csv_data, "screened_stocks.csv", "text/csv",
@@ -1198,8 +1300,30 @@ Stocks are classified based on the ratio thresholds you set below:
 
             st.markdown("---")
 
-            # Display enhanced stock cards
-            for card_idx, (idx, row) in enumerate(df.head(30).iterrows()):
+            # Sort results so both markets surface: Undervalued first, then Fair,
+            # then Overvalued / N/A — within each rating, biggest market cap first.
+            # Previously df was in upload order (US then SG, or vice versa) and
+            # display was capped at head(30), which hid the second file's results.
+            df_display = df.copy()
+            if 'Valuation' in df_display.columns:
+                val_order = {'Undervalued': 0, 'Fair': 1, 'Overvalued': 2, 'N/A': 3}
+                df_display['_v_rank'] = df_display['Valuation'].map(
+                    lambda v: val_order.get(v, 4)
+                )
+                sort_cols = ['_v_rank']
+                ascending = [True]
+                if 'Market Cap ($M)' in df_display.columns:
+                    df_display['Market Cap ($M)'] = pd.to_numeric(
+                        df_display['Market Cap ($M)'], errors='coerce'
+                    )
+                    sort_cols.append('Market Cap ($M)')
+                    ascending.append(False)
+                df_display = df_display.sort_values(sort_cols, ascending=ascending)
+                df_display = df_display.drop(columns=['_v_rank'])
+
+            # Display all screened cards (no 30-row cap — was hiding stocks from
+            # the second uploaded file when there were >30 survivors).
+            for card_idx, (idx, row) in enumerate(df_display.iterrows()):
                 row_data = row.to_dict()
                 sym = row.get('Symbol', 'N/A')
                 render_stock_card(
@@ -1260,21 +1384,37 @@ Stocks are classified based on the ratio thresholds you set below:
                      "the company's normal earning power.")
 
             # ────────────────────────────────────────────────────────────────
-            # Configurable scraping sources (client spec: Bloomberg, Reuters,
-            # Morningstar, Gurufocus by default; user can add/edit/disable).
+            # Configurable scraping sources
             # ────────────────────────────────────────────────────────────────
             from scraper import DEFAULT_SOURCES as _DEFAULT_SOURCES, render_url as _render_url
 
-            # Seed session state from defaults on first render.
-            # Each source: {label, homepage, url_template, enabled, is_default}
-            #   - homepage:    bare domain URL shown to client (matches client spec)
-            #   - url_template: per-ticker URL Firecrawl actually hits
-            if 'scraping_sources' not in st.session_state:
+            # Bumped whenever DEFAULT_SOURCES URLs change so stale sessions
+            # refresh their cached source list automatically.
+            _SOURCES_VERSION = 2
+
+            # Seed session state from defaults on first render, or refresh
+            # them when DEFAULT_SOURCES version was bumped. User-added custom
+            # sources are preserved across the refresh.
+            need_refresh = (
+                'scraping_sources' not in st.session_state
+                or st.session_state.get('scraping_sources_version', 0) < _SOURCES_VERSION
+            )
+            if need_refresh:
+                existing_custom = [
+                    s for s in st.session_state.get('scraping_sources', [])
+                    if not s.get("is_default")
+                ]
                 st.session_state.scraping_sources = [
                     {"label": lbl, "homepage": home, "url_template": tpl,
                      "enabled": True, "is_default": True}
                     for lbl, home, tpl in _DEFAULT_SOURCES
-                ]
+                ] + existing_custom
+                st.session_state.scraping_sources_version = _SOURCES_VERSION
+                # Clear any cached checkbox/text-input widget keys so the new
+                # default rows render with their fresh URLs.
+                for k in list(st.session_state.keys()):
+                    if str(k).startswith(("src_en_", "src_lbl_", "src_url_")):
+                        del st.session_state[k]
 
             with st.expander("🌐 Scraping Sources — control which sites Firecrawl pulls real data from",
                               expanded=False):
@@ -1303,6 +1443,7 @@ Stocks are classified based on the ratio thresholds you set below:
                     is_default = src.get("is_default", False)
                     with c2:
                         if is_default:
+                            # Defaults: label is fixed (client-spec sites)
                             st.markdown(f"**{src.get('label', '')}**")
                         else:
                             src["label"] = st.text_input(
@@ -1312,15 +1453,17 @@ Stocks are classified based on the ratio thresholds you set below:
                             )
                     with c3:
                         if is_default:
+                            # Defaults: show clean homepage URL (read-only display)
                             home = src.get("homepage", "")
                             st.markdown(f"`{home}`")
                         else:
+                            # Custom sites: user provides URL with placeholder
                             src["url_template"] = st.text_input(
                                 "url", value=src.get("url_template", ""),
                                 key=f"src_url_{idx}", label_visibility="collapsed",
                                 placeholder="https://site.com/{symbol_upper}/financials"
                             )
-                            src["homepage"] = src["url_template"]
+                            src["homepage"] = src["url_template"]  # for display parity
                     with c4:
                         if st.button("🗑️", key=f"src_del_{idx}",
                                      help=("Delete this source (default site)"
@@ -1390,6 +1533,12 @@ Stocks are classified based on the ratio thresholds you set below:
                             resolved = _render_url(s["url_template"], sample_sym, sample_mkt)
                             st.code(f"{s['label']}: {resolved}", language=None)
 
+            # Strict real-data mode is now ALWAYS ON per client spec: never feed
+            # Claude a CSV-snapshot fallback. If Firecrawl + XLS + FMP all fail
+            # for a ticker, the row reports "no real data available" instead of
+            # running a single-period snapshot analysis.
+            strict_real_data = True
+
             # Auth handled by Claude Code CLI subscription (no API key needed)
             if not AI_AVAILABLE:
                 st.error("claude-agent-sdk not installed. Run `pip install -r requirements.txt`.")
@@ -1417,9 +1566,15 @@ Stocks are classified based on the ratio thresholds you set below:
                                 market_pre = 'SG'
 
                         # Source 0: Firecrawl — scrape REAL 10-year filings data (preferred)
+                        scrape_diag: dict = {"source_status": [], "error": None}
                         try:
                             from scraper import scrape_financial_data, is_firecrawl_available
-                            if is_firecrawl_available():
+                            if not is_firecrawl_available():
+                                scrape_diag["error"] = (
+                                    "Firecrawl unavailable — FIRECRAWL_API_KEY not set "
+                                    "in environment / .env"
+                                )
+                            else:
                                 # Build the source list from session state (user-configurable).
                                 # Pass the 3-tuple form so the scraper can hit the per-ticker
                                 # subpath while we still display the bare-domain in UI.
@@ -1442,19 +1597,74 @@ Stocks are classified based on the ratio thresholds you set below:
                                     sym, company_name_pre, market_pre,
                                     custom_sources=user_sources if user_sources else None,
                                 )
+                                scrape_diag["source_status"] = scraped.get('source_status', [])
                                 if scraped.get('ok'):
                                     fin_data = {
                                         'source': f"Firecrawl ({scraped.get('source', 'web')})",
                                         'source_url': scraped.get('source_url', ''),
                                         'scraped_markdown': scraped.get('markdown', ''),
                                     }
-                        except Exception:
-                            pass
+                                else:
+                                    scrape_diag["error"] = scraped.get(
+                                        'error', 'Unknown Firecrawl failure'
+                                    )
+                        except Exception as e:
+                            scrape_diag["error"] = (
+                                f"Firecrawl call raised {type(e).__name__}: {str(e)[:200]}"
+                            )
 
                         status_text.text(f"Analyzing {sym} ({i+1}/{len(selected)})...")
 
+                        # Source 0.5: yfinance fallback (no API key, ~4y of real
+                        # income statement + cash flow from Yahoo Finance).
+                        # Runs whenever Firecrawl returned no usable scraped
+                        # markdown — ensures we still have REAL multi-year data
+                        # to feed Claude before declaring NO_DATA in strict mode.
+                        if fin_data is None:
+                            try:
+                                import yfinance as _yf
+                                t = _yf.Ticker(sym)
+                                inc = t.income_stmt
+                                cf = t.cashflow
+                                if inc is not None and not inc.empty:
+                                    # yfinance columns are timestamps, most-recent first.
+                                    # Reverse so they go oldest → newest like the other sources.
+                                    cols = list(inc.columns)[::-1]
+                                    periods = [c.strftime("%Y-%m-%d") if hasattr(c, "strftime") else str(c)
+                                               for c in cols]
+                                    def _row(df, key):
+                                        if df is None or df.empty or key not in df.index:
+                                            return []
+                                        vals = df.loc[key, cols].tolist()
+                                        return [None if (v is None or (isinstance(v, float) and v != v)) else float(v)
+                                                for v in vals]
+                                    fin_data = {
+                                        'source': 'yfinance (Yahoo Finance — real filings data, no API key)',
+                                        'periods': periods,
+                                        'revenue': _row(inc, 'Total Revenue'),
+                                        'net_income': _row(inc, 'Net Income'),
+                                        'gross_profit': _row(inc, 'Gross Profit'),
+                                        'operating_income': _row(inc, 'Operating Income'),
+                                        'eps': _row(inc, 'Diluted EPS'),
+                                        'operating_cf': _row(cf, 'Operating Cash Flow'),
+                                        'fcf': _row(cf, 'Free Cash Flow'),
+                                    }
+                                    scrape_diag.setdefault("source_status", []).append({
+                                        "label": "yfinance",
+                                        "url": f"yfinance.Ticker('{sym}')",
+                                        "status": f"ok:{len(periods)} periods",
+                                        "bytes": 0,
+                                    })
+                            except Exception as e:
+                                scrape_diag.setdefault("source_status", []).append({
+                                    "label": "yfinance",
+                                    "url": f"yfinance.Ticker('{sym}')",
+                                    "status": f"error:{type(e).__name__}: {str(e)[:120]}",
+                                    "bytes": 0,
+                                })
+
                         # Source 1: XLS file (if available)
-                        if sym in available:
+                        if fin_data is None and sym in available:
                             try:
                                 loader = DataLoader("/tmp")
                                 parsed = loader.load_anomaly_data(sym)
@@ -1504,8 +1714,11 @@ Stocks are classified based on the ratio thresholds you set below:
                                 except Exception:
                                     pass
 
-                        # Source 3: CSV screening data only (minimal)
-                        if fin_data is None:
+                        # Source 3: CSV screening data only (minimal).
+                        # SKIPPED when strict_real_data is on — we refuse to run
+                        # Claude on a single-period snapshot, per client spec
+                        # that input must be 100% real multi-year data.
+                        if fin_data is None and not strict_real_data:
                             filt_df = st.session_state.workflow_data.get('filtered_df')
                             if filt_df is not None and sym in filt_df['Symbol'].values:
                                 row = filt_df[filt_df['Symbol'] == sym].iloc[0]
@@ -1520,6 +1733,32 @@ Stocks are classified based on the ratio thresholds you set below:
                                     }
                                 }
 
+                        # Strict mode + no real data anywhere → bail without
+                        # calling Claude. Record a "no data" result with the
+                        # per-source diagnostic so the user sees WHY.
+                        if fin_data is None and strict_real_data:
+                            results[sym] = {
+                                'analysis': (
+                                    f"**Analysis skipped — no real multi-year data available for {sym}.**\n\n"
+                                    f"Strict real-data mode is ON. The configured scraping sources "
+                                    f"(Bloomberg / Reuters / Morningstar / Gurufocus or your custom list) "
+                                    f"did not return usable financial tables for this ticker, and no "
+                                    f"XLS / FMP fallback produced multi-year data either. "
+                                    f"No CSV-snapshot analysis was generated because that would not "
+                                    f"satisfy the client's '100% real data' requirement.\n\n"
+                                    f"**What to do:**\n"
+                                    f"1. Check the source diagnostic below to see which URLs returned empty.\n"
+                                    f"2. Edit the URL pattern for that source in the 'Scraping Sources' "
+                                    f"expander, or add a custom source that has data for this ticker.\n"
+                                    f"3. Or untick 'Strict real-data mode' to allow CSV-snapshot analysis."
+                                ),
+                                'rating': 'NO_DATA',
+                                'data_source': 'none (strict mode)',
+                                'has_data': False,
+                                'scrape_diag': scrape_diag,
+                            }
+                            continue
+
                         # --- Call Claude via claude-agent-sdk for AI analysis ---
                         try:
                             from llm import claude_complete
@@ -1533,6 +1772,21 @@ Stocks are classified based on the ratio thresholds you set below:
 
                             # Build the data block — prefer raw scraped markdown
                             # (preserves real financial tables) over JSON dump.
+                            grounding_rule = (
+                                "GROUNDING RULE — STRICT, NO EXCEPTIONS:\n"
+                                "• Every number, year, and ratio in your response MUST appear "
+                                "  somewhere in the FINANCIAL DATA block above. No exceptions.\n"
+                                "• Do NOT use any prior knowledge about this company. Treat it as "
+                                "  if you've never heard of it — your only source is the block above.\n"
+                                "• If a year, segment, or figure is not in the data, you MAY NOT "
+                                "  mention it. Say 'cannot assess — not in data' instead.\n"
+                                "• If you reference a number, it must be a number that physically "
+                                "  appears in the text above (rounding for readability is fine, but "
+                                "  the underlying value must be present).\n"
+                                "• If the data is empty or insufficient, your verdict must reflect "
+                                "  that — do not invent a forensic finding from nothing."
+                            )
+
                             if fin_data and fin_data.get('scraped_markdown'):
                                 data_summary = (
                                     f"DATA SOURCE: {fin_data.get('source', 'web')}\n"
@@ -1540,20 +1794,24 @@ Stocks are classified based on the ratio thresholds you set below:
                                     f"{fin_data['scraped_markdown']}"
                                 )
                                 data_provenance_note = (
-                                    "The data above is REAL, scraped from public filings — base your "
-                                    "analysis on these specific numbers. Cite specific years and figures."
+                                    "The data above is REAL, scraped live from the configured "
+                                    "sources (Bloomberg / Reuters / Morningstar / Gurufocus or "
+                                    "whatever the user configured). Base your analysis ONLY on "
+                                    "what is in this block. " + grounding_rule
                                 )
                             elif fin_data:
                                 data_summary = json.dumps(fin_data, default=str, indent=2)
                                 data_provenance_note = (
-                                    "The data above is structured from internal sources — "
-                                    "analyze based on these specific numbers."
+                                    "The data above is structured from the user's uploaded "
+                                    "screener / XLS / FMP API — all real, no AI invention. "
+                                    + grounding_rule
                                 )
                             else:
                                 data_summary = "No financial history available."
                                 data_provenance_note = (
-                                    "No financial data was available — state explicitly that you "
-                                    "cannot perform a forensic analysis without filings data."
+                                    "No financial data was scraped or loaded. State explicitly "
+                                    "that you cannot perform a forensic analysis without filings "
+                                    "data, and rate the verdict accordingly. " + grounding_rule
                                 )
 
                             prompt = f"""Analyze the financial history of {sym} ({company_name}) for anomalies and one-off distortions.
@@ -1586,7 +1844,19 @@ FORMAT YOUR RESPONSE AS:
 
                             ai_text = claude_complete(
                                 user=prompt,
-                                system="You are a forensic financial analyst specializing in detecting one-off distortions and anomalies in company financials. Be specific about years and magnitudes. If data is limited, state what you can and cannot assess. ALWAYS begin your response with one of these exact phrases: 'Overall: CLEAN', 'Overall: MINOR', or 'Overall: MATERIAL'.",
+                                system=(
+                                    "You are a forensic financial analyst detecting one-off "
+                                    "distortions in company financials. You are working under a "
+                                    "STRICT NO-HALLUCINATION rule: your only source of truth is "
+                                    "the FINANCIAL DATA block in the user message. You may NOT "
+                                    "use any prior knowledge you have about the company — pretend "
+                                    "you have never heard of it. If a fact (year, segment, figure, "
+                                    "event) is not in the data block, you may NOT cite it; say "
+                                    "'cannot assess — not in data' instead. Be specific about "
+                                    "years and magnitudes, but only those that appear in the data. "
+                                    "ALWAYS begin your response with one of these exact phrases: "
+                                    "'Overall: CLEAN', 'Overall: MINOR', or 'Overall: MATERIAL'."
+                                ),
                                 model=model,
                             )
 
@@ -1609,6 +1879,7 @@ FORMAT YOUR RESPONSE AS:
                                 'rating': rating,
                                 'data_source': fin_data.get('source', 'None') if fin_data else 'None',
                                 'has_data': True,
+                                'scrape_diag': scrape_diag,
                             }
                         except Exception as e:
                             results[sym] = {
@@ -1616,6 +1887,7 @@ FORMAT YOUR RESPONSE AS:
                                 'rating': 'ERROR',
                                 'data_source': fin_data.get('source', 'None') if fin_data else 'None',
                                 'has_data': False,
+                                'scrape_diag': scrape_diag,
                             }
 
                     progress.empty()
@@ -1630,16 +1902,27 @@ FORMAT YOUR RESPONSE AS:
                 for sym, d in st.session_state.agent_results['anomalies'].items():
                     rating = d.get('rating', 'UNKNOWN')
                     rating_map = {
-                        'CLEAN': ('✅', '#10b981', 'No significant distortions'),
-                        'MINOR': ('🟡', '#f59e0b', 'Minor one-offs detected'),
+                        'CLEAN':    ('✅', '#10b981', 'No significant distortions'),
+                        'MINOR':    ('🟡', '#f59e0b', 'Minor one-offs detected'),
                         'MATERIAL': ('🔴', '#ef4444', 'Material distortions found'),
-                        'ERROR': ('⚠️', '#94a3b8', 'Analysis error'),
-                        'UNKNOWN': ('❓', '#94a3b8', 'Could not determine'),
+                        'NO_DATA':  ('🚫', '#94a3b8', 'No real data — strict mode'),
+                        'ERROR':    ('⚠️', '#94a3b8', 'Analysis error'),
+                        'UNKNOWN':  ('❓', '#94a3b8', 'Could not determine'),
                     }
                     icon, color, desc = rating_map.get(rating, rating_map['UNKNOWN'])
 
-                    with st.expander(f"{icon} **{sym}** — {rating} ({desc}) | Data: {d.get('data_source', 'N/A')}", expanded=(rating == 'MATERIAL')):
-                        st.markdown(d.get('analysis', 'No analysis available.'))
+                    expand_default = (rating in ('MATERIAL', 'NO_DATA'))
+                    with st.expander(
+                        f"{icon} **{sym}** — {rating} ({desc}) | Data: "
+                        f"{d.get('data_source', 'N/A')}",
+                        expanded=expand_default,
+                    ):
+                        # Escape `$` so Streamlit's markdown renderer doesn't
+                        # interpret $46.02M ... $27.77M as a LaTeX math block
+                        # and italicize/concatenate everything between them.
+                        raw = d.get('analysis', 'No analysis available.')
+                        safe = raw.replace('$', '\\$')
+                        st.markdown(safe)
 
                     if rating in ('CLEAN', 'MINOR'):
                         passed.append(sym)
@@ -1749,7 +2032,9 @@ FORMAT YOUR RESPONSE AS:
                     else:
                         target_row = target_rows.iloc[0]
                         peers = find_peers(selected_for_compare, full_universe, limit=5)
-                        st.markdown(f"**{peer_search_summary(selected_for_compare, peers, target_row.get('Industry'))}**")
+                        st.markdown(
+                            f"**{peer_search_summary(selected_for_compare, peers, target_row.get('Industry'), target_row.get('Subindustry'))}**"
+                        )
 
                         if peers.empty:
                             st.info("No peers found in the screening universe — try widening your screening criteria to include more companies in the same industry.")
@@ -1789,15 +2074,14 @@ FORMAT YOUR RESPONSE AS:
 
             st.markdown("---")
 
-            # Generate DOCX Report + Navigation
-            col1, col2 = st.columns([2, 2])
+            # Generate Reports + Navigation
+            col1, col2, col3 = st.columns([1.5, 2, 2])
             with col1:
                 if st.button("← Back to Anomaly Analysis"):
                     st.session_state.current_step = 2
                     st.rerun()
             with col2:
-                if st.button("📄 Generate AI-Enhanced Professional Report", type="primary", use_container_width=True):
-                    # Check for API key
+                if st.button("📄 Generate DOCX Report", type="secondary", use_container_width=True):
                     if not AI_AVAILABLE:
                         st.error("claude-agent-sdk not installed. Run `pip install -r requirements.txt`.")
                     else:
@@ -1805,22 +2089,19 @@ FORMAT YOUR RESPONSE AS:
                             from enhanced_report import generate_professional_report
                             from datetime import datetime
 
-                            # Get screening criteria for report
                             criteria = st.session_state.workflow_data.get('criteria', {})
 
-                            # Progress container
                             progress_container = st.empty()
                             progress_bar = st.progress(0)
 
                             def update_progress(message):
                                 progress_container.text(message)
 
-                            # Generate AI-enhanced report
                             with st.spinner("Generating AI-enhanced professional report... This may take a few minutes for deep analysis."):
                                 buffer = generate_professional_report(
                                     report_data=report_data,
                                     criteria=criteria,
-                                    api_key=None,  # auth via Claude Code CLI
+                                    api_key=None,
                                     progress_callback=update_progress,
                                     universe_df=st.session_state.workflow_data.get('filtered_df'),
                                 )
@@ -1828,17 +2109,72 @@ FORMAT YOUR RESPONSE AS:
                             progress_bar.progress(100)
                             progress_container.empty()
 
-                            st.download_button(
-                                label="📥 Download AI-Enhanced Professional Report (DOCX)",
-                                data=buffer,
-                                file_name=f"Value_Investment_AI_Report_{datetime.now().strftime('%Y%m%d')}.docx",
-                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                            )
-                            st.success("✅ AI-enhanced professional report generated! Click above to download.")
+                            # Cache so the download button survives reruns
+                            st.session_state['docx_report_bytes'] = buffer.getvalue() if hasattr(buffer, 'getvalue') else buffer
+                            st.session_state['docx_report_filename'] = f"Value_Investment_AI_Report_{datetime.now().strftime('%Y%m%d')}.docx"
                         except Exception as e:
-                            st.error(f"Error generating report: {e}")
+                            st.error(f"Error generating DOCX report: {e}")
                             import traceback
                             st.code(traceback.format_exc())
+            with col3:
+                if st.button("📊 Generate Excel Report (VIA Style)", type="primary", use_container_width=True):
+                    try:
+                        from excel_report import generate_excel_report
+                        from datetime import datetime
+
+                        criteria = st.session_state.workflow_data.get('criteria', {})
+
+                        progress_container = st.empty()
+                        progress_bar = st.progress(0)
+
+                        def update_progress_xlsx(message):
+                            progress_container.text(message)
+
+                        with st.spinner("Generating Excel report with 10-year VIA-style charts... This may take a few minutes (Firecrawl + Claude calls per company)."):
+                            xlsx_buffer = generate_excel_report(
+                                report_data=report_data,
+                                criteria=criteria,
+                                progress_callback=update_progress_xlsx,
+                                universe_df=st.session_state.workflow_data.get('filtered_df'),
+                            )
+
+                        progress_bar.progress(100)
+                        progress_container.empty()
+
+                        # Cache so the download button survives reruns
+                        st.session_state['xlsx_report_bytes'] = xlsx_buffer.getvalue() if hasattr(xlsx_buffer, 'getvalue') else xlsx_buffer
+                        st.session_state['xlsx_report_filename'] = f"Value_Investment_AI_Report_{datetime.now().strftime('%Y%m%d')}.xlsx"
+                    except Exception as e:
+                        st.error(f"Error generating Excel report: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+
+            # Persistent download buttons (rendered outside click blocks so they survive reruns)
+            if st.session_state.get('docx_report_bytes') or st.session_state.get('xlsx_report_bytes'):
+                st.markdown("---")
+                dl_col1, dl_col2 = st.columns(2)
+                with dl_col1:
+                    if st.session_state.get('docx_report_bytes'):
+                        st.download_button(
+                            label="📥 Download DOCX Report",
+                            data=st.session_state['docx_report_bytes'],
+                            file_name=st.session_state['docx_report_filename'],
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            use_container_width=True,
+                            key="dl_docx",
+                        )
+                        st.caption("✅ DOCX report ready.")
+                with dl_col2:
+                    if st.session_state.get('xlsx_report_bytes'):
+                        st.download_button(
+                            label="📥 Download Excel Report (VIA Style)",
+                            data=st.session_state['xlsx_report_bytes'],
+                            file_name=st.session_state['xlsx_report_filename'],
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                            key="dl_xlsx",
+                        )
+                        st.caption("✅ Excel report ready.")
 
 
 def show_screener_page():
@@ -2508,13 +2844,16 @@ def show_about_page():
     - **Research Agent**: AI that generates investment theses and recommendations
     - **Tool Use**: Agents can call tools to screen stocks, detect anomalies, compare companies
 
-    ### Valuation Classification
+    ### Valuation Classification (In-House Two-Stage DCF)
 
-    | Classification | EPV/MC Ratio | Meaning |
-    |----------------|--------------|---------|
-    | Undervalued | > 1.3 | EPV 30%+ above Market Cap |
-    | Fair Value | 0.7 - 1.3 | Within reasonable range |
-    | Overvalued | < 0.7 | EPV 30%+ below Market Cap |
+    Each stock gets a per-share **IV range** [Low IV, High IV] from the client's
+    in-house DCF formula (10% discount, 2% terminal growth, 30% margin of safety):
+
+    | Classification | Condition |
+    |----------------|-----------|
+    | 🟢 Undervalued | Current Price < **Low IV** |
+    | 🟡 Fair Value | **Low IV** ≤ Current Price ≤ **High IV** |
+    | 🔴 Overvalued | Current Price > **High IV** |
 
     ### How to Enable AI
 

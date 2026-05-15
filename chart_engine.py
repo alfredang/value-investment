@@ -42,8 +42,8 @@ def make_competitor_bar_chart_png(
     metric_column: str,
     target_symbol: str,
     is_percentage: bool = True,
-    width_in: float = 6.0,
-    height_in: float = 3.5,
+    width_in: float = 6.4,
+    height_in: float = 3.4,
     dpi: int = 150,
 ) -> Optional[BytesIO]:
     """
@@ -79,10 +79,17 @@ def make_competitor_bar_chart_png(
     sym_order = list(peers.index) + [target_symbol] if target_val is not None else list(peers.index)
     ordered = ordered.loc[sym_order]
 
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Georgia", "DejaVu Serif", "Times New Roman", "serif"],
+    })
+
     fig, ax = plt.subplots(figsize=(width_in, height_in), dpi=dpi)
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
 
     colors = [BRAND_NAVY if s == target_symbol else PEER_GREY for s in ordered.index]
-    bars = ax.barh(ordered.index, ordered.values, color=colors, edgecolor="white")
+    bars = ax.barh(ordered.index, ordered.values, color=colors, edgecolor="white", height=0.55)
 
     # Value labels at the end of each bar
     for bar, val in zip(bars, ordered.values):
@@ -91,17 +98,22 @@ def make_competitor_bar_chart_png(
             bar.get_y() + bar.get_height() / 2,
             f"{val:.1f}{'%' if is_percentage else ''}",
             va="center",
-            fontsize=9,
+            fontsize=12, weight="bold", color="#222222",
         )
 
-    ax.set_title(f"{metric_label} — {target_symbol} vs peers", fontsize=11, weight="bold", pad=10)
+    ax.set_title(
+        f"{metric_label} — {target_symbol} vs peers",
+        fontsize=15, weight="bold", pad=14, color="#111111", family="serif",
+    )
     if is_percentage:
         ax.xaxis.set_major_formatter(FuncFormatter(_format_pct))
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="y", labelsize=9)
-    ax.tick_params(axis="x", labelsize=8)
-    ax.grid(axis="x", linestyle=":", alpha=0.5)
+    ax.spines["left"].set_color("#cccccc")
+    ax.spines["bottom"].set_color("#cccccc")
+    ax.tick_params(axis="y", labelsize=12, colors="#222222")
+    ax.tick_params(axis="x", labelsize=11, colors="#666666")
+    ax.grid(axis="x", linestyle=":", alpha=0.55, color="#cccccc")
     ax.set_axisbelow(True)
     fig.tight_layout()
 
@@ -168,6 +180,216 @@ def make_ten_year_line_chart_png(
 
     buf = BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+# ============================================================================
+# VIA ATLAS-style chart (mirrors the client's standard report template)
+# Single-metric line chart with: trend line, "Initial Published Date" marker,
+# boxed latest-value annotation, and red end-date label.
+# ============================================================================
+
+def make_via_atlas_chart_png(
+    chart_number: int,
+    section_title: str,
+    metric_label: str,
+    points: List[Tuple[str, float]],
+    initial_published_date: Optional[str] = None,
+    color: str = "#ee6c1f",
+    y_format: str = "money",
+    width_in: float = 6.4,
+    height_in: float = 4.4,
+    dpi: int = 150,
+) -> Optional[BytesIO]:
+    """
+    Render a VIA ATLAS-style chart: a single metric over time with a dashed
+    linear trend line, a red vertical "Initial Published Date" marker, a green
+    circle highlighting the data point at that date, a boxed annotation
+    showing the latest value, and a red end-date label tile.
+
+    Args:
+        chart_number: number prefix shown in the title (e.g. 5 -> "5. ...")
+        section_title: bold heading (e.g. "Cash Flow From Operations")
+        metric_label: subtitle (e.g. "Operating Cash Flow")
+        points: list of (date_str, value) tuples ordered chronologically.
+                date_str format e.g. "2024-10" or "2024".
+        initial_published_date: date string matching one of the point labels;
+                if None, defaults to ~70% of the way through the series.
+        color: line color (orange / green / black / purple ... rotate per chart).
+        y_format: "money" | "pct" | "ratio"
+
+    Returns:
+        BytesIO of PNG bytes; None if no data.
+    """
+    if not points or len(points) < 2:
+        return None
+
+    import numpy as np
+
+    dates = [p[0] for p in points]
+    values = [p[1] for p in points]
+
+    # Numeric x-axis for trend line fitting
+    x = np.arange(len(dates))
+    y = np.array(values, dtype=float)
+    valid = ~np.isnan(y)
+    if valid.sum() < 2:
+        return None
+
+    # Use a clean serif family for the VIA template aesthetic
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Georgia", "DejaVu Serif", "Times New Roman", "serif"],
+    })
+
+    fig, ax = plt.subplots(figsize=(width_in, height_in), dpi=dpi)
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
+
+    # Faint "VIA" watermark behind the plot area
+    fig.text(
+        0.5, 0.45, "VIA",
+        ha="center", va="center",
+        fontsize=170, color="#d8d8d8", alpha=0.35,
+        weight="bold", family="serif",
+        zorder=0,
+    )
+
+    # Main data line with open circle markers
+    ax.plot(
+        x, y,
+        color=color, linewidth=2.4,
+        marker="o", markersize=7, markerfacecolor="white",
+        markeredgecolor=color, markeredgewidth=1.8,
+        zorder=3,
+    )
+
+    # Dashed mint-green linear trend line
+    if valid.sum() >= 2:
+        coeffs = np.polyfit(x[valid], y[valid], 1)
+        trend = np.poly1d(coeffs)(x)
+        ax.plot(
+            x, trend,
+            color="#34d399", linewidth=1.8, linestyle="--",
+            alpha=0.9, zorder=2,
+        )
+
+    # Initial Published Date: vertical red line + green circle on intersection
+    if initial_published_date is None:
+        ipd_idx = int(len(dates) * 0.7)  # default ~70% through
+    else:
+        try:
+            ipd_idx = dates.index(initial_published_date)
+        except ValueError:
+            # Try a less strict match (year prefix)
+            ipd_year = initial_published_date.split("-")[0]
+            ipd_idx = next(
+                (i for i, d in enumerate(dates) if str(d).startswith(ipd_year)),
+                int(len(dates) * 0.7),
+            )
+
+    if 0 <= ipd_idx < len(dates):
+        ipd_value = values[ipd_idx]
+        ax.axvline(
+            x=ipd_idx,
+            color="#dc2626", linewidth=1.6, alpha=0.85, zorder=4,
+        )
+        # Green highlight circle on the data point at IPD
+        ax.scatter(
+            [ipd_idx], [ipd_value],
+            s=180, facecolor="none", edgecolor="#10b981",
+            linewidths=2.4, zorder=5,
+        )
+        # Red label "Initial Published Date" near IPD
+        y_range = max(y[valid]) - min(y[valid]) if valid.sum() > 1 else 1.0
+        ax.annotate(
+            "Initial Published Date",
+            xy=(ipd_idx, ipd_value),
+            xytext=(ipd_idx - 1.8, ipd_value + y_range * 0.18),
+            fontsize=12, color="#dc2626", style="italic",
+            ha="left", zorder=6,
+        )
+
+    # Boxed annotation at the right end showing the latest value
+    last_x = len(dates) - 1
+    last_y = values[-1]
+    if y_format == "money":
+        last_label = f"{last_y:,.2f}"
+    elif y_format == "pct":
+        last_label = f"{last_y:.2f}"
+    else:
+        last_label = f"{last_y:.2f}"
+    ax.annotate(
+        last_label,
+        xy=(last_x, last_y),
+        xytext=(10, 0),
+        textcoords="offset points",
+        fontsize=11, weight="bold",
+        bbox=dict(boxstyle="round,pad=0.4", fc="white",
+                  ec="#444444", linewidth=0.9),
+        va="center",
+        zorder=6,
+    )
+
+    # Red end-date label tile at the very right edge along the x-axis
+    end_date_label = dates[-1]
+    ax.annotate(
+        end_date_label,
+        xy=(last_x, ax.get_ylim()[0]),
+        xytext=(0, -28),
+        textcoords="offset points",
+        fontsize=11, color="white", weight="bold",
+        ha="center", va="top",
+        bbox=dict(boxstyle="square,pad=0.45", fc="#dc2626",
+                  ec="#dc2626"),
+        zorder=6,
+    )
+
+    # Y-axis formatter
+    if y_format == "money":
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:,.0f}"))
+    elif y_format == "pct":
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:.0f}"))
+
+    # Title block: "N. Section Title" / metric subtitle (serif, VIA-style)
+    title_text = f"{chart_number}. {section_title}"
+    fig.text(
+        0.05, 0.94, title_text,
+        ha="left", fontsize=26, weight="bold",
+        color="#111111", family="serif",
+    )
+    fig.text(
+        0.5, 0.86, metric_label,
+        ha="center", fontsize=17, style="italic",
+        color="#333333", family="serif",
+    )
+
+    # X-axis labels — show every ~Nth so they don't crowd
+    step = max(1, len(dates) // 9)
+    ax.set_xticks(x[::step])
+    ax.set_xticklabels([dates[i] for i in range(0, len(dates), step)],
+                        fontsize=11, rotation=0)
+
+    # Grid + spine cleanup
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#cccccc")
+    ax.spines["bottom"].set_color("#cccccc")
+    ax.grid(axis="y", linestyle=":", alpha=0.55, color="#cccccc")
+    ax.set_axisbelow(True)
+    ax.tick_params(axis="both", labelsize=11, colors="#666666")
+
+    # Pad y-axis so annotations don't get clipped
+    if valid.sum() > 1:
+        y_min, y_max = min(y[valid]), max(y[valid])
+        y_range = y_max - y_min
+        ax.set_ylim(y_min - y_range * 0.15, y_max + y_range * 0.25)
+
+    fig.tight_layout(rect=[0.04, 0.04, 0.98, 0.83])
+    buf = BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
     plt.close(fig)
     buf.seek(0)
     return buf

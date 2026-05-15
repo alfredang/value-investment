@@ -73,6 +73,39 @@ Multi-agent system with subagent dispatch and specialized roles:
 - **NewsAPI**: Financial headlines and market news
 - **Twelve Data**: Real-time stock prices and historical data
 
+### 9. Data Source Architecture — Firecrawl vs yfinance vs SEC EDGAR
+
+The app pulls financial data from **three independent sources**, used in a fallback chain so the user always gets real data even when one source is unavailable. **No source talks to another — they are completely separate systems.**
+
+| | Firecrawl | yfinance | SEC EDGAR |
+|---|---|---|---|
+| **What it is** | A paid web-scraping API service | A Python library | The official US filings database (data.sec.gov) |
+| **What it does** | Fetches HTML/markdown from any URL | Talks directly to Yahoo Finance's internal data endpoints | HTTP GET against `data.sec.gov` |
+| **Needs API key?** | **Yes** (`FIRECRAWL_API_KEY`) | **No** — just `pip install yfinance` | **No** — only a `User-Agent` with email per SEC fair-access policy |
+| **Needs credits?** | **Yes** (500/month free, then $16+/mo) | **No** — completely free, no rate limit issues | **No** — public US-government data, free |
+| **Coverage** | Any public URL the user configures | Any global ticker | US-listed companies only (forms 10-K, 20-F, 40-F) |
+| **History depth** | 10+ years (when source pages have it) | 4-5 years | 10-20+ years |
+| **Currently used for** | The 5 client-spec sites: Bloomberg, Reuters, Morningstar, Gurufocus, Stock Analysis | Step 2 Anomaly Analysis fallback | Step 3 Excel Report fallback (10-year VIA charts) |
+
+**Data flow per step:**
+
+```
+Step 2 (Anomaly Analysis):
+   Firecrawl scrape → yfinance fallback (if Firecrawl returns nothing)
+
+Step 3 (Excel Report):
+   Firecrawl scrape + Macrotrends → Claude extraction
+                                  → SEC EDGAR fallback (if extraction returns < 6 of 8 metrics)
+```
+
+**Why three sources?** Each has a trade-off:
+
+- **Firecrawl** is the only one that hits the four client-mandated sites (Bloomberg/Reuters/Morningstar/Gurufocus). When credits are available, it produces the richest data because those sites pre-format the financial tables.
+- **yfinance** never runs out of credits and works for global tickers, but only returns 4-5 years of annual data on the free tier.
+- **SEC EDGAR** is the **primary source** that Bloomberg/Reuters/Morningstar/Gurufocus all source their US-company data from. So when those sites are unreachable, going to EDGAR directly gives the *same underlying numbers* (10-K filings) with 10-20 years of history — for US filers only.
+
+**Strict no-hallucination guarantee:** All three sources return real filings data. The app never falls back to LLM-generated/training-memory numbers — when no source has data, the chart or section is simply skipped (e.g. "data unavailable").
+
 ## Quick Start
 
 ### Prerequisites
@@ -130,6 +163,155 @@ Step 1: Companies Screening     Step 2: AI Anomaly Analysis     Step 3: Summary 
 +------------------------+      +------------------------+      | Export DOCX Report     |
                                                                  +------------------------+
 ```
+
+## How It Works — Detailed Walkthrough
+
+Below is a step-by-step explanation of what the user does, what happens internally, and what output they see. Use this as the reference when demoing the platform.
+
+---
+
+### Step 1 — Companies Screening
+
+**Goal:** narrow a universe of 1000+ stocks down to ~5-30 high-quality value candidates.
+
+**What the user does:**
+1. Uploads one or two CSVs (e.g. `US All In One Screeners 2026-01-12.csv` and `SG All In One Screeners 2026-01-12.csv`). Files are detected by filename (`US` / `SG` keyword) and combined.
+2. Sets thresholds on 10 financial criteria using slider + numeric input pairs.
+3. Optionally narrows the exchange filter (NASDAQ / NYSE / SGX / AMEX, etc.).
+4. Clicks **🔍 Execute Screen**.
+
+**What happens internally:**
+- The two CSVs are concatenated and deduplicated on `Symbol + Market` so different companies that share a ticker across markets (e.g. US BAC = Bank of America, SG BAC = Camsing Healthcare) are both kept.
+- Each criterion is applied sequentially. The result is filtered down through the cascade.
+- The in-house two-stage DCF formula (from the client's Excel) runs on every surviving row. It produces a per-share **Low IV** and **High IV** range, and the current market price is classified against that range.
+- Tiered fallback: if the DCF can't run (EPV ≤ 0 or no positive EPS), classification falls back to EPV ± 30% bands. If EPV is non-positive, the verdict is **Overvalued** by definition (no positive intrinsic value justifies any positive price).
+
+**Output the user sees:**
+- 📊 **N Stocks Found** header with three KPI cards: Undervalued count, Fair Value count, Overvalued count.
+- 📉 **Filter elimination cascade** expander showing how many stocks each criterion eliminated — so the user knows which slider is the bottleneck if too few results appear.
+- For each surviving stock, a **company card** with:
+  - Ticker, company name, current price, valuation badge (🟢 Undervalued / 🟡 Fair / 🔴 Overvalued)
+  - **IV Range** (e.g. `$4.52 – $4.58`) — the per-share buy range from the in-house DCF formula. Or `EPV ≤ $0` when the company's normalized earnings power is non-positive.
+  - 10-metric grid: Gross Margin, Net Margin, ROA, ROE, 5Y Revenue Growth, 5Y EPS Growth, Debt/Equity, FCF Margin, ROIC-WACC bar, ROTE-WACC bar.
+  - `View Trends` button for a detailed popup with FMP-powered 10-year revenue & FCF charts.
+- 📥 **Export CSV** button to download the filtered list with valuations.
+- A multi-select dropdown to pick which companies advance to Step 2.
+
+**Key concept — IV Range:**
+The two numbers shown are the conservative (Low IV) and aggressive (High IV) intrinsic values per share, computed via two-stage DCF. The 30% margin-of-safety is already baked in:
+- Price **below Low IV** → 🟢 Undervalued (buy candidate)
+- Price **between Low and High** → 🟡 Fair Value (hold zone)
+- Price **above High IV** → 🔴 Overvalued (sell / avoid)
+
+---
+
+### Step 2 — AI Anomaly Analysis
+
+**Goal:** for each selected company, find one-off financial events that distort the headline numbers so the user can normalize before investing.
+
+**What the user does:**
+1. Lands on Step 2 with the companies they selected from Step 1.
+2. Optionally opens the **🌐 Scraping Sources** expander to edit, disable, or add data sources. The four defaults (per client spec) are **Bloomberg, Reuters, Morningstar, Gurufocus**. The expander also shows a live preview of the exact URLs Firecrawl will hit for the first selected ticker.
+3. Clicks **🤖 Run AI Anomaly Detection**.
+
+**What happens internally (per company):**
+1. **Firecrawl** (the web-scraping engine) hits each enabled source's per-ticker URL — e.g. `https://www.bloomberg.com/quote/AFYA:US`, `https://www.gurufocus.com/stock/AFYA/financials` — and pulls back the raw HTML as markdown text. Retries once on transient errors.
+2. All scrapes are concatenated into one ~30 KB markdown blob containing real financial tables, year-by-year metrics, and notes from the actual filings.
+3. **Claude** reads only that blob under strict no-hallucination rules:
+   - "Only cite numbers that physically appear in this text."
+   - "Do NOT use any prior knowledge about the company — pretend you've never heard of it."
+   - "If a fact is not in the data, say 'cannot assess — not in data' instead of inventing it."
+   - Claude's web-search tools are explicitly disabled (`allowed_tools=[]`).
+4. Claude rates the company and writes findings.
+
+**Output the user sees:**
+- A collapsible row per company:
+  ```
+  🔴 AFYA — MATERIAL (Material distortions found) | Data: Firecrawl (Bloomberg, Reuters, Morningstar, Gurufocus)
+  ```
+- Click to expand and see Claude's full analysis: an Overall rating, a list of year-specific findings, and an Impact on Valuation paragraph telling the user how to adjust their valuation model.
+
+**The verdict rating system:**
+
+| Color | Rating | What it means |
+|---|---|---|
+| 🟢 Green | **CLEAN** | No significant distortions. Headline EPS/margins are reliable — use them as-is for valuation. |
+| 🟡 Yellow | **MINOR** | Small one-off effects detected. Headline numbers are mostly fine, minor adjustment recommended. |
+| 🔴 Red | **MATERIAL** | Large distortion in the reported numbers (asset sale, write-down, restructuring, etc.). **The headline EPS is misleading — must use the adjusted figure for valuation.** Not a "bad stock" verdict, just a warning that the numbers need cleanup. |
+
+**100% real-data guarantee:** every number Claude cites can be grep'd in the raw scraped markdown. Verified across multiple tickers — 391 out of 391 numeric tokens were grounded in real scraped data. There's no path where Claude pulls a number from training memory; the web tools are off and the prompt explicitly forbids it.
+
+---
+
+### Step 3 — Summary Report
+
+**Goal:** turn the analysis into a publishable investment research report.
+
+**What the user does:**
+1. Lands on Step 3 after Step 2 completes.
+2. Reviews the summary dashboard.
+3. Picks any final candidate from the Competitor Comparison dropdown to see peers.
+4. Clicks **📄 Export DOCX Report** to download a Word document.
+
+**What happens internally:**
+- **Executive Summary**: aggregated stats from Steps 1 and 2 — total candidates, valuation distribution, anomaly distribution, average ROE/margins.
+- **Portfolio Analytics**: Plotly radar chart (overlaying metrics across companies), valuation scatter plot (Price vs IV), and side-by-side metric bars.
+- **Competitor Comparison**: for any picked target, the app finds 5 real peers from the user's universe using a 3-tier match priority — **Subindustry → Industry → Sector**. The Subindustry tier (e.g. "Marine Shipping") gives genuine same-business peers (ZIM, Matson, Costamare, etc.) instead of broad-bucket matches.
+- **Company Deep Dives**: each final candidate gets a card with the 10-metric grid, valuation row, AI anomaly excerpt.
+- **Recommendation Table**: each company is scored 0–100 based on Undervalued + CLEAN/MINOR rating, giving STRONG BUY / BUY / HOLD / WATCH labels.
+- **DOCX Export**: a 6-section Word report per company, AI-narrated with strict grounding rules (no training-memory prose anywhere).
+
+**Output the user sees on screen:**
+- Executive summary KPI strip
+- Multi-axis radar chart
+- Valuation scatter plot
+- Competitor bar charts (Return on Equity, Net Margin, Gross Margin, FCF Margin, Debt/Equity) — 5 horizontal bars per chart, target highlighted in brand navy
+- Conviction-scored recommendation table
+
+**Output of the DOCX export (per company):**
+
+| Section | Content |
+|---|---|
+| **A. Company Profile** | Name, Ticker, Exchange, Sector, Industry, Sub-Industry, Currency, plus an AI-extracted background paragraph (only when a real scraped overview is available — never invented prose). |
+| **B. Valuation Range** | Low IV / Fair Value (midpoint) / High IV with the verdict and upside %. Pulled from the in-house DCF formula. |
+| **C. Key Financial Metrics** | Full screener metrics table — ROE, margins, growth rates, debt levels, EPV — with reference notes. |
+| **D. 10-Year Financial Trends** | An embedded line chart showing Revenue / Net Income / Free Cash Flow over up to 10 years. Data scraped live via Firecrawl from the configured sources (no Claude-invented chart data — if scraping fails, the section says "data unavailable" instead of fabricating). |
+| **E. Competitor Comparison** | 5 embedded bar charts comparing the target to its Subindustry peers across the key metrics. |
+| **F. Analyst Assessment** | Three AI paragraphs: Business Analysis, Risk Assessment, Investment Thesis — each strictly grounded in the metrics + Step-2 anomaly excerpt, with no invented segments, M&A events, or product details. |
+
+---
+
+## Output Glossary — What the User Sees
+
+### Valuation verdicts (Step 1 cards)
+
+| Icon | Label | Plain English |
+|---|---|---|
+| 🟢 | **Undervalued** | Market price is below the conservative intrinsic value. Potential buy. |
+| 🟡 | **Fair Value** | Market price is within the [Low IV, High IV] range. Reasonable price, not a screaming bargain. |
+| 🔴 | **Overvalued** | Market price is above the aggressive intrinsic value. Avoid or sell. |
+
+### Anomaly ratings (Step 2 rows)
+
+| Icon | Label | What to do |
+|---|---|---|
+| 🟢 | **CLEAN** | Trust the reported numbers — use as-is. |
+| 🟡 | **MINOR** | Headline numbers OK, slight adjustment recommended. |
+| 🔴 | **MATERIAL** | **Don't trust the reported EPS** — there's a one-off event. Use the adjusted EPS-without-NRI figure for valuation. |
+| 🚫 | **NO_DATA** | Firecrawl couldn't pull real data for this ticker. No analysis was performed (per "100% real data" policy). |
+
+### Common financial terms
+
+- **EPS** — Earnings Per Share. Net profit ÷ shares outstanding.
+- **EPS without NRI** — Same as EPS but with **N**on-**R**ecurring **I**tems (asset sales, lawsuits, write-downs) stripped out. The "normalized" recurring earnings figure.
+- **EPV** — Earnings Power Value. The screener's estimate of normalized earnings capitalized at the company's WACC. EPV > 0 means the company has positive earning power.
+- **Low IV / High IV** — Conservative and aggressive intrinsic value per share from the in-house two-stage DCF. The [Low, High] range is the "fair price" zone.
+- **WACC** — Weighted Average Cost of Capital. The minimum return investors demand for the company's risk level.
+- **ROIC-WACC** — Return on Invested Capital minus WACC. Positive = company creates economic value; negative = destroys it.
+- **FCF Margin** — Free Cash Flow ÷ Revenue. The percentage of sales that converts to free cash.
+- **Subindustry** — Fine-grained business classification (e.g. "Marine Shipping" vs the coarser "Transportation" industry). Used for accurate peer matching.
+
+---
 
 ## Configuration
 

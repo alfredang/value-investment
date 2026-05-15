@@ -30,20 +30,25 @@ def find_peers(
     """
     Find peer companies for the target from the screening universe.
 
-    Strategy:
-    1. Same Sector AND Industry → top N by Market Cap (preferred)
-    2. If fewer than `limit` peers found, widen to same Sector only
-    3. Always exclude the target itself
+    Match priority (narrow → wide), so peers are in the same actual business:
+      1. Same Subindustry (e.g. "Marine Shipping" — most specific)
+      2. Same Industry    (e.g. "Transportation")
+      3. Same Sector      (e.g. "Industrials")
+
+    The Subindustry classification comes from the user's screener export
+    (Gurufocus All-In-One uses GICS-style sub-industry tags). This is real
+    industry-classification data, not heuristics.
 
     Args:
         target_symbol: ticker of the target company
         universe: DataFrame of all screened/loaded stocks
         limit: max number of peers to return
-        same_industry_first: if True, narrow Sector+Industry first
+        same_industry_first: kept for API compatibility (ignored — match
+            priority is now Subindustry > Industry > Sector unconditionally)
 
     Returns:
         DataFrame of peer rows, sorted by Market Cap descending. May be empty
-        if no peers exist.
+        if no peers exist at any tier.
     """
     if universe is None or universe.empty:
         return pd.DataFrame()
@@ -55,26 +60,34 @@ def find_peers(
     target = target_rows.iloc[0]
     target_sector = target.get('Sector')
     target_industry = target.get('Industry')
+    target_subindustry = target.get('Subindustry')
 
     others = universe[universe['Symbol'] != target_symbol].copy()
 
-    # Pass 1: Sector + Industry match
-    candidates = others
-    if same_industry_first and target_sector and target_industry:
-        narrow = others[
-            (others['Sector'] == target_sector) &
-            (others['Industry'] == target_industry)
-        ]
-        if not narrow.empty:
-            candidates = narrow
+    def _valid(s):
+        return s is not None and pd.notna(s) and str(s).strip() not in ("", "N/A")
 
-    # Pass 2: widen to Sector only if narrow yielded too few
-    if len(candidates) < limit and target_sector:
-        widened = others[others['Sector'] == target_sector]
-        # merge: prefer narrow matches, fill with widened
-        if not widened.empty:
+    # Tier 1: Same Subindustry — actual same-business peers
+    tier1 = pd.DataFrame()
+    if 'Subindustry' in others.columns and _valid(target_subindustry):
+        tier1 = others[others['Subindustry'] == target_subindustry]
+
+    candidates = tier1
+
+    # Tier 2: widen to same Industry if Tier 1 didn't yield enough
+    if len(candidates) < limit and _valid(target_industry):
+        tier2 = others[others['Industry'] == target_industry]
+        if not tier2.empty:
             existing_syms = set(candidates['Symbol']) if not candidates.empty else set()
-            extras = widened[~widened['Symbol'].isin(existing_syms)]
+            extras = tier2[~tier2['Symbol'].isin(existing_syms)]
+            candidates = pd.concat([candidates, extras], ignore_index=True)
+
+    # Tier 3: widen to same Sector if still too few
+    if len(candidates) < limit and _valid(target_sector):
+        tier3 = others[others['Sector'] == target_sector]
+        if not tier3.empty:
+            existing_syms = set(candidates['Symbol']) if not candidates.empty else set()
+            extras = tier3[~tier3['Symbol'].isin(existing_syms)]
             candidates = pd.concat([candidates, extras], ignore_index=True)
 
     if candidates.empty:
@@ -117,10 +130,30 @@ def build_peer_metrics_frame(target_row: pd.Series, peers: pd.DataFrame) -> pd.D
     return df
 
 
-def peer_search_summary(target_symbol: str, peers: pd.DataFrame, target_industry: Optional[str]) -> str:
-    """One-line description of what was found, for UI display."""
+def peer_search_summary(
+    target_symbol: str,
+    peers: pd.DataFrame,
+    target_industry: Optional[str],
+    target_subindustry: Optional[str] = None,
+) -> str:
+    """One-line description of what was found, for UI display.
+
+    Prefers the most specific classification we actually matched against —
+    Subindustry if available, otherwise Industry.
+    """
     n = len(peers)
     if n == 0:
         return f"No peers found for {target_symbol} in the screening universe."
-    industry_str = f" in the {target_industry} industry" if target_industry else ""
-    return f"{n} peer{'s' if n != 1 else ''} found for {target_symbol}{industry_str}."
+
+    def _valid(s):
+        return s is not None and pd.notna(s) and str(s).strip() not in ("", "N/A")
+
+    # Show the most specific classification we actually have
+    if _valid(target_subindustry):
+        bucket = f"{target_subindustry} sub-industry"
+    elif _valid(target_industry):
+        bucket = f"{target_industry} industry"
+    else:
+        bucket = "screening universe"
+
+    return f"{n} peer{'s' if n != 1 else ''} found for {target_symbol} in the {bucket}."

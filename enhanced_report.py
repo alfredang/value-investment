@@ -49,34 +49,62 @@ def generate_ai_analysis(client, prompt: str, max_tokens: int = 1500) -> str:
 
 
 def generate_company_background(client, company_data: Dict) -> str:
-    """Generate a 2-paragraph factual company background for the Profile section."""
+    """Generate a factual company background grounded ONLY in real data.
+
+    Per client spec: no AI-invented prose. If a scraped company overview is
+    available (passed via company_data['scraped_overview']), Claude is asked
+    to extract a factual summary from THAT TEXT ONLY with a strict no-
+    training-memory rule. If no scraped overview is available, returns a
+    structured stub built from the CSV's Sector/Industry/Exchange fields.
+    """
     symbol = company_data.get('symbol', 'Unknown')
     company = company_data.get('company', 'Unknown Company')
     sector = company_data.get('sector', 'N/A')
     industry = company_data.get('industry', 'N/A')
+    exchange = company_data.get('exchange', 'N/A')
+    scraped = (company_data.get('scraped_overview') or '').strip()
 
-    prompt = f"""Write a clean, professional 2-paragraph company background for inclusion in a research report.
+    if scraped:
+        prompt = f"""Below is text scraped live from a public-data source for {company} ({symbol}).
+Your job is to extract a clean 2-paragraph factual company background from it.
 
-Company: {company} (ticker: {symbol})
-Sector: {sector}
-Industry: {industry}
+SCRAPED TEXT (the ONLY source you may use):
+\"\"\"
+{scraped[:6000]}
+\"\"\"
 
-Output rules — strict:
-- Output ONLY the two paragraphs of background prose. No preamble, no caveats about
-  your training data, no "I have limited knowledge" disclaimers, no source URLs,
-  no "Paragraph 1:" or "Paragraph 2:" labels, no markdown.
-- Paragraph 1: What the company does (core products/services, customer base).
-- Paragraph 2: Where it operates and its competitive position in its industry.
-- 3-4 sentences per paragraph. Plain text suitable for a Word document.
-- If you do not know the specific company well, write a generic, factual paragraph
-  describing what businesses in this Sector/Industry typically do, framed as
-  "{company} operates in the {industry} industry, where companies typically..." —
-  do NOT meta-comment about your knowledge limits.
+STRICT GROUNDING RULE:
+- Every fact you write MUST come from the scraped text above.
+- Do NOT use any prior knowledge about {company}. Treat it as if you've never heard of it.
+- If a detail (e.g. founding year, CEO, segment) is not in the scraped text, do not invent it.
+- If the scraped text is too thin to support 2 paragraphs, write what it supports and stop.
 
-Begin the response with the first paragraph directly."""
+Output format:
+- Plain prose, 2 paragraphs, 3-4 sentences each. No preamble, no labels, no markdown.
+- Paragraph 1: what the company does (products/services).
+- Paragraph 2: where it operates / competitive context.
 
-    text = generate_ai_analysis(client, prompt, max_tokens=500)
-    return _clean_background_text(text)
+Begin with paragraph 1 directly."""
+        text = generate_ai_analysis(client, prompt, max_tokens=500)
+        return _clean_background_text(text)
+
+    # No scraped overview available — return a deterministic factual stub
+    # from CSV fields only. No AI call, no chance of hallucination.
+    parts = [f"{company} (ticker {symbol})"]
+    facts = []
+    if exchange and exchange != 'N/A':
+        facts.append(f"is listed on {exchange}")
+    if sector and sector != 'N/A':
+        facts.append(f"is classified in the {sector} sector")
+    if industry and industry != 'N/A':
+        facts.append(f"within the {industry} industry")
+    stub = ", ".join(facts).strip() if facts else "is in the screener universe."
+    return (
+        f"{parts[0]} {stub}. "
+        f"A narrative company background could not be generated because no "
+        f"scraped overview was available from the configured sources. The "
+        f"structured facts above are taken verbatim from the uploaded screener CSV."
+    )
 
 
 def _clean_background_text(text: str) -> str:
@@ -256,10 +284,10 @@ def generate_company_deep_dive(client, company_data: Dict) -> Dict[str, str]:
     ai_rating = metrics.get('ai_rating', 'N/A')
     anomaly_risk = "LOW" if ai_rating == 'CLEAN' else "MODERATE" if ai_rating == 'MINOR' else "ELEVATED"
 
-    # Business Analysis
+    # Business Analysis — grounded ONLY in the metrics above. No memory pulls.
     business_prompt = f"""Provide a concise business analysis (2-3 paragraphs) for {symbol} ({company}).
 
-FINANCIAL PROFILE:
+FINANCIAL PROFILE (these numbers are real, sourced from the user's screener CSV):
 - Return on Equity: {metrics['roe']}%
 - Gross Margin: {metrics['gross_margin']}%
 - Net Margin: {metrics['net_margin']}%
@@ -273,47 +301,72 @@ Based on these metrics, analyze:
 2. Competitive positioning and moat indicators
 3. Capital allocation efficiency and management quality signals
 
-Write as a senior analyst providing insights to portfolio managers. Be specific about what the numbers tell us."""
+STRICT GROUNDING RULES:
+- Every specific figure you quote MUST be one of the seven numbers above (or
+  arithmetic derived from them). Do not invent additional ratios, segment
+  splits, geographic breakdowns, product mix, customer counts, or M&A events.
+- Do NOT use prior knowledge about this specific company. Treat it as anonymous.
+  Reason from the metrics ALONE, framing your analysis as "given these metrics,
+  the implied business profile is..." rather than asserting facts about the
+  named company.
+- If a metric is missing/None/N/A, say so explicitly — do not fill it in.
+
+Write as a senior analyst. Plain text suitable for a Word document."""
 
     business_analysis = generate_ai_analysis(client, business_prompt, max_tokens=800)
 
     # Risk Assessment
     ai_analysis_excerpt = metrics.get('ai_analysis', '')[:500] if metrics.get('ai_analysis') else 'No AI anomaly analysis available.'
 
-    risk_prompt = f"""Provide a comprehensive risk assessment (2-3 paragraphs) for {symbol}.
+    risk_prompt = f"""Provide a risk assessment (2-3 paragraphs) for {symbol}.
 
-RISK INDICATORS:
+RISK INDICATORS (real, from the user's data):
 - AI Anomaly Rating: {ai_rating} (Anomaly Risk: {anomaly_risk})
 - Debt-to-Equity: {metrics['debt_equity']}
 - ROIC-WACC Spread: {metrics.get('roic_wacc', 'N/A')}
 
-AI ANOMALY ANALYSIS FINDINGS:
+AI ANOMALY ANALYSIS FINDINGS (this is the verbatim Step-2 output, itself
+grounded in Firecrawl-scraped tables — treat it as ground truth):
 {ai_analysis_excerpt}
 
 Analyze:
-1. What the AI anomaly findings tell us about earnings quality and financial consistency
+1. What the anomaly findings imply about earnings quality and financial consistency
 2. Specific red flags or concerns investors should monitor
 3. Mitigating factors or reasons for confidence
 
-Be balanced but highlight genuine concerns."""
+STRICT GROUNDING RULES:
+- Every specific year, dollar amount, or percentage you cite MUST appear in
+  the indicators or the anomaly excerpt above. Do not introduce new figures.
+- Do NOT use prior knowledge about this specific company. If a risk you'd
+  normally flag is not supported by the data above, omit it.
+- It is fine — and expected — to acknowledge "the data does not surface
+  enough detail to assess X" instead of inventing a story."""
 
     risk_analysis = generate_ai_analysis(client, risk_prompt, max_tokens=700)
 
-    # Investment Thesis
-    thesis_prompt = f"""Write a clear investment thesis (2 paragraphs) for {symbol} ({company}).
+    # Investment Thesis — grounded ONLY in the four facts above + Step-2 output.
+    thesis_prompt = f"""Write an investment thesis (2 paragraphs) for {symbol} ({company}).
 
-KEY FACTS:
+KEY FACTS (real, from the user's data):
 - Valuation: {metrics['valuation']} (EPV/MC: {f"{epv_mc_ratio:.2f}" if epv_mc_ratio else 'N/A'})
 - ROE: {metrics['roe']}% | Gross Margin: {metrics['gross_margin']}%
 - AI Anomaly Rating: {ai_rating} ({anomaly_risk} risk)
 - Growth: Revenue {metrics['rev_growth']}% | EPS {metrics['eps_growth']}%
 
-Write a compelling investment thesis that:
-1. Summarizes the bull case in clear terms
-2. Identifies key risks and monitoring points
-3. Provides a clear recommendation (Strong Buy / Buy / Hold / Avoid)
+Write a thesis that:
+1. Summarizes the bull case implied by these facts
+2. Identifies risks supported by these facts (or by the Step-2 anomaly excerpt above)
+3. Provides a clear recommendation (Strong Buy / Buy / Hold / Avoid) tied to
+   the EPV/MC valuation and the anomaly rating
 
-Be decisive and specific about why an investor should or should not own this stock."""
+STRICT GROUNDING RULES:
+- Every specific number you mention MUST be one of the facts above.
+- Do NOT invent product launches, M&A, catalysts, contracts, regulatory news,
+  competitor names, or industry events. If a thesis-relevant detail is not in
+  the facts above, do not include it.
+- Do NOT use prior knowledge about this specific company. Frame the thesis as
+  "given these metrics, the implied case is..." not "{company} is known for...".
+"""
 
     investment_thesis = generate_ai_analysis(client, thesis_prompt, max_tokens=600)
 
@@ -620,44 +673,11 @@ Rules:
     return _parse_chart_json(raw)
 
 
-def _fetch_ten_year_via_claude(symbol: str, company: str) -> Optional[Dict[str, list]]:
-    """
-    LAST-RESORT fallback when Firecrawl fails: ask Claude to estimate from
-    its training memory. Output is approximate and the caption flags this
-    clearly.
-    """
-    from llm import claude_complete
-
-    system = (
-        "You are a financial-data assistant. Output STRICT JSON only — no preamble, "
-        "no commentary, no markdown code fences, no caveats. If you genuinely do not "
-        "have data for a company, return {\"years\": []}."
-    )
-    user = f"""Provide your best estimate of {company} ({symbol})'s annual financial data for the past 10 fiscal years based on your training knowledge.
-
-For each year, give:
-- Total Revenue (in USD millions, converted from local currency if needed)
-- Net Income (in USD millions)
-- Free Cash Flow (in USD millions)
-
-Return ONLY this exact JSON shape, no other text:
-
-{{
-  "symbol": "{symbol}",
-  "years": [
-    {{"year": "2015", "revenue_m": 25.0, "net_income_m": 2.0, "fcf_m": 3.5}},
-    {{"year": "2016", "revenue_m": 35.0, "net_income_m": 3.0, "fcf_m": 4.0}}
-  ]
-}}
-
-Order years oldest first. Use null for any field you cannot estimate.
-Output ONLY the JSON."""
-
-    try:
-        raw = claude_complete(user=user, system=system)
-    except Exception:
-        return None
-    return _parse_chart_json(raw)
+# NOTE: A "Claude estimates from training memory" fallback used to live here.
+# It was REMOVED per client requirement that 100% of analyzed input must be
+# real, scraped data. The chart now only renders if (1) Firecrawl returns real
+# tables or (2) the CSV-derived synthesis (math from real screener metrics)
+# succeeds. Otherwise the report prints a "data unavailable" placeholder.
 
 
 def _synthesize_history_from_csv_row(company_data: Dict) -> Optional[Dict[str, list]]:
@@ -737,12 +757,16 @@ def _embed_ten_year_chart(doc, symbol: str, company: str = "", company_data: Opt
     """
     Embed a 5-10 year line chart in the DOCX.
 
-    Strategy (waterfall):
-      1. PREFERRED: Firecrawl scrapes real filings from stockanalysis.com,
-         then Claude extracts the numbers from those real tables.
-      2. CSV-based synthesis (math-derived extrapolation from screening metrics).
-      3. LAST RESORT: Claude estimates from training memory (clearly flagged).
-      4. If all three fail, return False so caller prints a placeholder message.
+    Strategy (waterfall — every step grounded in REAL data, no training memory):
+      1. PREFERRED: Firecrawl scrapes real filings (Bloomberg/Reuters/
+         Morningstar/Gurufocus), then Claude extracts numbers verbatim from
+         those real tables.
+      2. CSV-based math synthesis: arithmetic extrapolation from the user's
+         uploaded screener metrics (Market Cap, PE, Margins, growth rates).
+         No hallucination — pure arithmetic on real CSV inputs.
+      3. If both fail, return False so caller prints a "data unavailable"
+         placeholder. Training-memory fallback was REMOVED per client spec
+         (100% real input required).
     """
     try:
         from chart_engine import make_ten_year_line_chart_png
@@ -778,14 +802,9 @@ def _embed_ten_year_chart(doc, symbol: str, company: str = "", company_data: Opt
                     f"filings before any investment decision."
                 )
 
-        # Step 3: Claude training memory (LAST resort, clearly flagged)
-        if not series:
-            series = _fetch_ten_year_via_claude(symbol, company or symbol)
-            if series:
-                source_label = (
-                    f"Source: Claude AI estimates from training memory — figures for {symbol} are "
-                    f"approximate. Verify against 10-K / primary filings before any investment decision."
-                )
+        # Step 3 (training-memory fallback) is INTENTIONALLY GONE. If both
+        # Firecrawl and CSV synthesis produced nothing, we render no chart
+        # — never fabricate numbers from Claude's parametric memory.
 
         if not series:
             return False

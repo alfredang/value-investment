@@ -33,18 +33,27 @@ except ImportError:
 #   - ticker_url_template is what Firecrawl actually hits (the per-ticker subpath
 #     where the real financial data lives — the homepage itself has none).
 DEFAULT_SOURCES: List[Tuple[str, str, str]] = [
-    ("Bloomberg",
-     "https://www.bloomberg.com/",
-     "https://www.bloomberg.com/quote/{symbol_upper}:US"),
-    ("Reuters",
-     "https://www.reuters.com/",
-     "https://www.reuters.com/markets/companies/{symbol_upper}.OQ"),
-    ("Morningstar",
-     "https://www.morningstar.com/",
-     "https://www.morningstar.com/stocks/xnas/{symbol_lower}/financials"),
+    # Gurufocus first — most universal across exchanges and rarely paywalled.
     ("Gurufocus",
      "https://www.gurufocus.com/",
      "https://www.gurufocus.com/stock/{symbol_upper}/financials"),
+    # Stock Analysis — universal, no exchange suffix, scraper-friendly, 10-yr history.
+    ("Stock Analysis",
+     "https://stockanalysis.com/",
+     "https://stockanalysis.com/stocks/{symbol_lower}/financials/"),
+    # Bloomberg ":US" suffix works for both NASDAQ and NYSE US listings.
+    ("Bloomberg",
+     "https://www.bloomberg.com/",
+     "https://www.bloomberg.com/quote/{symbol_upper}:US"),
+    # Reuters — bare ticker (no .OQ/.N suffix) lets Reuters redirect to the
+    # canonical exchange-aware page; the hardcoded .OQ blocked all NYSE tickers.
+    ("Reuters",
+     "https://www.reuters.com/",
+     "https://www.reuters.com/markets/companies/{symbol_upper}"),
+    # Morningstar — use the search URL so we don't have to guess xnas vs xnys.
+    ("Morningstar",
+     "https://www.morningstar.com/",
+     "https://www.morningstar.com/stocks/{symbol_lower}"),
 ]
 
 
