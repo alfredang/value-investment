@@ -73,39 +73,6 @@ Multi-agent system with subagent dispatch and specialized roles:
 - **NewsAPI**: Financial headlines and market news
 - **Twelve Data**: Real-time stock prices and historical data
 
-### 9. Data Source Architecture — Firecrawl vs yfinance vs SEC EDGAR
-
-The app pulls financial data from **three independent sources**, used in a fallback chain so the user always gets real data even when one source is unavailable. **No source talks to another — they are completely separate systems.**
-
-| | Firecrawl | yfinance | SEC EDGAR |
-|---|---|---|---|
-| **What it is** | A paid web-scraping API service | A Python library | The official US filings database (data.sec.gov) |
-| **What it does** | Fetches HTML/markdown from any URL | Talks directly to Yahoo Finance's internal data endpoints | HTTP GET against `data.sec.gov` |
-| **Needs API key?** | **Yes** (`FIRECRAWL_API_KEY`) | **No** — just `pip install yfinance` | **No** — only a `User-Agent` with email per SEC fair-access policy |
-| **Needs credits?** | **Yes** (500/month free, then $16+/mo) | **No** — completely free, no rate limit issues | **No** — public US-government data, free |
-| **Coverage** | Any public URL the user configures | Any global ticker | US-listed companies only (forms 10-K, 20-F, 40-F) |
-| **History depth** | 10+ years (when source pages have it) | 4-5 years | 10-20+ years |
-| **Currently used for** | The 5 client-spec sites: Bloomberg, Reuters, Morningstar, Gurufocus, Stock Analysis | Step 2 Anomaly Analysis fallback | Step 3 Excel Report fallback (10-year VIA charts) |
-
-**Data flow per step:**
-
-```
-Step 2 (Anomaly Analysis):
-   Firecrawl scrape → yfinance fallback (if Firecrawl returns nothing)
-
-Step 3 (Excel Report):
-   Firecrawl scrape + Macrotrends → Claude extraction
-                                  → SEC EDGAR fallback (if extraction returns < 6 of 8 metrics)
-```
-
-**Why three sources?** Each has a trade-off:
-
-- **Firecrawl** is the only one that hits the four client-mandated sites (Bloomberg/Reuters/Morningstar/Gurufocus). When credits are available, it produces the richest data because those sites pre-format the financial tables.
-- **yfinance** never runs out of credits and works for global tickers, but only returns 4-5 years of annual data on the free tier.
-- **SEC EDGAR** is the **primary source** that Bloomberg/Reuters/Morningstar/Gurufocus all source their US-company data from. So when those sites are unreachable, going to EDGAR directly gives the *same underlying numbers* (10-K filings) with 10-20 years of history — for US filers only.
-
-**Strict no-hallucination guarantee:** All three sources return real filings data. The app never falls back to LLM-generated/training-memory numbers — when no source has data, the chart or section is simply skipped (e.g. "data unavailable").
-
 ## Quick Start
 
 ### Prerequisites
