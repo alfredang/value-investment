@@ -2013,7 +2013,12 @@ FORMAT YOUR RESPONSE AS:
             st.markdown("### 📊 Competitor Comparison")
             st.caption("Compare each final candidate against peers in the same Sector + Industry from your screening universe.")
 
-            full_universe = st.session_state.workflow_data.get('filtered_df')
+            # Use the full uploaded universe (screener_df) for peer search so
+            # every company finds real sector peers, not just the screened few.
+            full_universe = st.session_state.workflow_data.get(
+                'screener_df',
+                st.session_state.workflow_data.get('filtered_df'),
+            )
             if full_universe is None or full_universe.empty:
                 st.info("No screening universe available — re-run Step 1 to enable competitor analysis.")
             else:
@@ -2103,13 +2108,22 @@ FORMAT YOUR RESPONSE AS:
                             def update_progress(message):
                                 progress_container.text(message)
 
+                            # Peer comparison searches the FULL uploaded universe
+                            # (screener_df, ~1500 stocks) not the ~19 that passed
+                            # screening — otherwise most companies have no sector
+                            # peers and Section E comes out empty.
+                            peer_universe = st.session_state.workflow_data.get(
+                                'screener_df',
+                                st.session_state.workflow_data.get('filtered_df'),
+                            )
+
                             with st.spinner("Generating AI-enhanced professional report... This may take a few minutes for deep analysis."):
                                 buffer = generate_professional_report(
                                     report_data=report_data,
                                     criteria=criteria,
                                     api_key=None,
                                     progress_callback=update_progress,
-                                    universe_df=st.session_state.workflow_data.get('filtered_df'),
+                                    universe_df=peer_universe,
                                 )
 
                             progress_bar.progress(100)
@@ -2136,12 +2150,20 @@ FORMAT YOUR RESPONSE AS:
                         def update_progress_xlsx(message):
                             progress_container.text(message)
 
+                        # Peer comparison searches the FULL uploaded universe
+                        # (screener_df) not just the screened subset, so every
+                        # company finds real sector peers for Section E.
+                        peer_universe = st.session_state.workflow_data.get(
+                            'screener_df',
+                            st.session_state.workflow_data.get('filtered_df'),
+                        )
+
                         with st.spinner("Preparing your investment report — this may take a few minutes while we gather the latest financial data for each company."):
                             xlsx_buffer = generate_excel_report(
                                 report_data=report_data,
                                 criteria=criteria,
                                 progress_callback=update_progress_xlsx,
-                                universe_df=st.session_state.workflow_data.get('filtered_df'),
+                                universe_df=peer_universe,
                             )
 
                         progress_bar.progress(100)
