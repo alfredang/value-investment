@@ -184,6 +184,13 @@ def scrape_financial_data(
     else:
         sources = DEFAULT_SOURCES
 
+    # Reuters and Stock Analysis have no coverage of SGX-listed companies —
+    # their SG URLs always return empty/error pages. Skip them for SG tickers
+    # so we don't waste Firecrawl credits and don't show false "empty" rows
+    # in the diagnostic. Gurufocus / Bloomberg / Morningstar cover SGX fine.
+    SG_UNSUPPORTED = {"reuters", "stock analysis"}
+    is_sg = market.upper() == "SG"
+
     candidates: List[Tuple[str, str]] = []
     for entry in sources:
         if not entry:
@@ -194,8 +201,11 @@ def scrape_financial_data(
             label, template = entry[0], entry[1]
         else:
             continue
-        if label and template:
-            candidates.append((label, render_url(template, symbol, market)))
+        if not (label and template):
+            continue
+        if is_sg and label.strip().lower() in SG_UNSUPPORTED:
+            continue
+        candidates.append((label, render_url(template, symbol, market)))
 
     combined_md_parts: List[str] = []
     sources_used: List[str] = []

@@ -1879,12 +1879,49 @@ FORMAT YOUR RESPONSE AS:
                                         rating = r
                                         break
 
+                            # Extract the LIVE share price from the Firecrawl
+                            # scrape (Bloomberg / Gurufocus quote pages show it).
+                            # 100% Firecrawl-sourced — Claude only reads the
+                            # number off the already-scraped page. Used to
+                            # override the stale CSV "Current Price" in the
+                            # final report (client: "share price not real-time").
+                            live_price = None
+                            if fin_data and fin_data.get('scraped_markdown'):
+                                try:
+                                    price_raw = claude_complete(
+                                        user=(
+                                            f"From the scraped financial page below for "
+                                            f"{sym}, extract ONLY the current/latest share "
+                                            f"price as a plain number — no $ sign, no text, "
+                                            f"no commas. If you genuinely cannot find a "
+                                            f"current price, reply exactly: NONE\n\n"
+                                            f"{fin_data['scraped_markdown'][:8000]}"
+                                        ),
+                                        system=(
+                                            "You extract one number from scraped text. "
+                                            "Reply with ONLY the number, or NONE. No other "
+                                            "words. Do not invent — the number must appear "
+                                            "in the text."
+                                        ),
+                                        model=model,
+                                    )
+                                    if 'NONE' not in price_raw.upper():
+                                        pm = _re.search(r"[-+]?\d[\d,]*\.?\d*",
+                                                        price_raw.replace(',', ''))
+                                        if pm:
+                                            pv = float(pm.group(0))
+                                            if pv == pv and pv > 0:
+                                                live_price = pv
+                                except Exception:
+                                    live_price = None
+
                             results[sym] = {
                                 'analysis': ai_text,
                                 'rating': rating,
                                 'data_source': fin_data.get('source', 'None') if fin_data else 'None',
                                 'has_data': True,
                                 'scrape_diag': scrape_diag,
+                                'live_price': live_price,
                             }
                         except Exception as e:
                             results[sym] = {
@@ -1994,7 +2031,11 @@ FORMAT YOUR RESPONSE AS:
                     'eps_growth': stock.get('5-Year EPS without NRI Growth Rate'),
                     'epv': stock.get('Earnings Power Value (EPV)'),
                     'market_cap': stock.get('Market Cap ($M)'),
-                    'current_price': stock.get('Current Price'),
+                    # Live price scraped by Firecrawl in Step 2 if available,
+                    # else the stale CSV snapshot price.
+                    'current_price': (anom.get('live_price')
+                                      if anom.get('live_price')
+                                      else stock.get('Current Price')),
                     'pe_ratio': stock.get('PE Ratio (TTM)'),
                     'fcf_growth': stock.get('5-Year FCF Growth Rate (Per Share)'),
                     'low_iv': stock.get('Low IV'),

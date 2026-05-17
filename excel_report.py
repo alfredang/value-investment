@@ -271,15 +271,18 @@ provides it."""
         if clean:
             out[key] = clean
 
-    # If Firecrawl + Claude extraction gave us partial data (fewer than 6 of
-    # the 8 required metrics), fill in the rest from SEC EDGAR (10-year
-    # official filings data, free, no API key).
+    # If Firecrawl + Claude extraction didn't yield ALL 8 required metrics,
+    # fill the gaps from SEC EDGAR (official filings data, free, no API key).
+    # The per-metric merge below keeps whichever source has the longer
+    # series, so a rich 10-year Firecrawl metric is never overwritten by a
+    # shorter SEC series — SEC only fills metrics Firecrawl missed entirely
+    # or covered with fewer years.
     REQUIRED_METRICS = {
         "Revenue ($M)", "Net Income ($M)", "EPS", "Operating Income ($M)",
         "Operating Cash Flow ($M)", "Free Cash Flow ($M)",
         "Return on Equity %", "Return on Assets %",
     }
-    if len(set(out.keys()) & REQUIRED_METRICS) < 6:
+    if len(set(out.keys()) & REQUIRED_METRICS) < len(REQUIRED_METRICS):
         sec_data = _sec_edgar_atlas_metrics(symbol, company)
         for k, series in sec_data.items():
             existing = out.get(k, [])
