@@ -182,7 +182,18 @@ def compute_valuation_range(company_data: Dict) -> Dict[str, Any]:
     if low is None or high is None or low <= 0 or high <= 0:
         epv_val = _num(company_data.get('epv'))
         if epv_val is None or epv_val <= 0:
-            out['verdict'] = 'N/A (Negative EPS — DCF math undefined)'
+            # Loss-making / no positive earnings power per share. Per client
+            # requirement the verdict must NEVER be N/A — it must be one of
+            # Undervalued / Fair Value / Overvalued. A company with no
+            # positive intrinsic value cannot justify any positive market
+            # price, so the verdict is Overvalued by definition. This mirrors
+            # Tier 3 of valuation.analyze_dataframe used by the screener.
+            out['lower'] = 0.0
+            out['fair'] = 0.0
+            out['upper'] = 0.0
+            out['verdict'] = 'Overvalued'
+            if cp is not None and cp > 0:
+                out['upside_pct'] = -100.0
             return out
         out['lower'] = round(epv_val * 0.7, 2)
         out['fair'] = round(epv_val, 2)

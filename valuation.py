@@ -153,6 +153,18 @@ def compute_in_house_valuation(
     low_g = min(historical_growth / LOW_IV_GROWTH_DIVISOR, LOW_IV_GROWTH_CAP)
     high_g = min(historical_growth / HIGH_IV_GROWTH_DIVISOR, HIGH_IV_GROWTH_CAP)
 
+    # Client requirement: the valuation must ALWAYS be a RANGE, never a single
+    # fixed number. When historical growth is ~0 there is no growth signal in
+    # the data, so the dampened low_g and high_g both collapse to 0 and Low IV
+    # would equal High IV. In that case fall back to the formula's own growth
+    # bounds — conservative 0%, aggressive = the High-IV cap — so the two
+    # scenarios still differ and a genuine range is produced. Both endpoints
+    # are the client formula's own parameters, so this still "follows the
+    # in-house formula".
+    if abs(high_g - low_g) < 1e-9:
+        low_g = 0.0
+        high_g = HIGH_IV_GROWTH_CAP
+
     low_iv = _two_stage_dcf(
         present_eps, low_g,
         discount_rate=discount_rate,
@@ -169,6 +181,12 @@ def compute_in_house_valuation(
         terminal_years=terminal_years,
         margin_of_safety=margin_of_safety,
     )
+
+    # Ensure correct labelling — "Low IV" must be the smaller of the two
+    # (for a declining company the aggressive scenario can land higher).
+    if low_iv > high_iv:
+        low_iv, high_iv = high_iv, low_iv
+        low_g, high_g = high_g, low_g
 
     return {
         "historical_growth": historical_growth,
